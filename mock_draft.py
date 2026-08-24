@@ -131,8 +131,8 @@ def pick_for_roster(available, cfg, roster_counts):
     def cnt(*pos):
         return sum(have.get(p, 0) for p in pos)
 
-    # hard positional caps for a sane roster
-    caps = {"QB": 2, "TE": 3, "DST": 1, "K": 1}
+    # hard positional caps for a sane roster (TE 2: a starter + one upside/stream)
+    caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1}
 
     # which positions are ALLOWED to be drafted right now, in priority order
     need_starter = []
@@ -160,6 +160,16 @@ def pick_for_roster(available, cfg, roster_counts):
     need_dst = have.get("DST", 0) < st.get("DST", 1) and rounds_left <= 4
     need_k = have.get("K", 0) < st.get("K", 1) and rounds_left <= 2
 
+    # FLEX + bench depth are RB/WR by default. A real manager does NOT spend a
+    # flex slot on a SECOND TE when a TE starter is already rostered — TE has no
+    # flex advantage over RB/WR. Only allow a 2nd TE into flex/bench if RB/WR are
+    # genuinely gone from the board.
+    te_starter_filled = have.get("TE", 0) >= st.get("TE", 1)
+    rbwr_available = any(pv.position in ("RB", "WR")
+                         and have.get(pv.position, 0) < caps.get(pv.position, 99)
+                         for pv in available)
+    flex_set = {"RB", "WR"} if (te_starter_filled and rbwr_available) else {"RB", "WR", "TE"}
+
     if need_starter:
         allowed = set(need_starter)
     elif need_dst:
@@ -167,9 +177,9 @@ def pick_for_roster(available, cfg, roster_counts):
     elif need_k:
         allowed = {"K"}
     elif need_flex:
-        allowed = {"RB", "WR", "TE"}
+        allowed = set(flex_set)
     else:
-        allowed = {"RB", "WR", "TE"}   # bench depth at skill positions
+        allowed = set(flex_set)        # bench depth at skill positions
 
     # take best-ADP player in the allowed set that isn't over its cap
     for pv in available:                      # already ADP-sorted

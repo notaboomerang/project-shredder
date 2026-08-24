@@ -188,6 +188,16 @@ def _allowed_positions(strategy: str, rnd: int, roster_positions: list[str],
     caps = _need_caps(roster_positions, cfg, strategy)
     allowed = allowed & caps                       # drop capped positions
 
+    # NO second premium TE into the flex/bench: once the TE STARTER is filled,
+    # a real manager fills flex with RB/WR, never a 2nd elite TE. Remove TE from
+    # the allowed set unless doing so would leave nothing draftable.
+    have = {}
+    for p in roster_positions:
+        have[p] = have.get(p, 0) + 1
+    te_filled = have.get("TE", 0) >= cfg.starters.get("TE", 1)
+    if te_filled and "TE" in allowed and (allowed - {"TE"}):
+        allowed = allowed - {"TE"}
+
     # if a STARTER slot is still empty and we're running out of rounds, force it
     rounds_left = cfg.rounds - rnd + 1
     unfilled = _unfilled_starters(roster_positions, cfg) & caps
