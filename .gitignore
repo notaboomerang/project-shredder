@@ -1,0 +1,31 @@
+# ==== SECRETS — never commit ====
+data/espn_cookies.json      # ESPN session cookies (espn_s2 + SWID) — private login
+data/leagues.json           # your saved ESPN league IDs
+.env
+*.secret
+
+# ==== Large / regenerable data (too big or re-downloadable) ====
+data/pbp_2024.csv           # ~99MB nflverse play-by-play — regenerate, don't commit
+data/*.parquet
+
+# ==== Python ====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ==== Node / tooling scratch ====
+node_modules/
+.streamlit/secrets.toml
+.playwright-mcp/
+
+# ==== OS / editor cruft ====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ==== Large media (optional — keep repo lean) ====
+assets/*.mp4
+assets/vo/

@@ -1,0 +1,162 @@
+{
+  "ARI": {
+    "go_rate": 0.239,
+    "rz_td_rate": 0.559,
+    "scoring_vol": 20.0
+  },
+  "ATL": {
+    "go_rate": 0.217,
+    "rz_td_rate": 0.632,
+    "scoring_vol": 20.2
+  },
+  "BAL": {
+    "go_rate": 0.231,
+    "rz_td_rate": 0.597,
+    "scoring_vol": 23.3
+  },
+  "BUF": {
+    "go_rate": 0.312,
+    "rz_td_rate": 0.725,
+    "scoring_vol": 26.8
+  },
+  "CAR": {
+    "go_rate": 0.328,
+    "rz_td_rate": 0.617,
+    "scoring_vol": 18.1
+  },
+  "CHI": {
+    "go_rate": 0.283,
+    "rz_td_rate": 0.646,
+    "scoring_vol": 24.2
+  },
+  "CIN": {
+    "go_rate": 0.18,
+    "rz_td_rate": 0.727,
+    "scoring_vol": 23.2
+  },
+  "CLE": {
+    "go_rate": 0.197,
+    "rz_td_rate": 0.553,
+    "scoring_vol": 14.4
+  },
+  "DAL": {
+    "go_rate": 0.304,
+    "rz_td_rate": 0.623,
+    "scoring_vol": 25.7
+  },
+  "DEN": {
+    "go_rate": 0.157,
+    "rz_td_rate": 0.618,
+    "scoring_vol": 21.8
+  },
+  "DET": {
+    "go_rate": 0.267,
+    "rz_td_rate": 0.696,
+    "scoring_vol": 27.3
+  },
+  "GB": {
+    "go_rate": 0.255,
+    "rz_td_rate": 0.653,
+    "scoring_vol": 23.1
+  },
+  "HOU": {
+    "go_rate": 0.137,
+    "rz_td_rate": 0.5,
+    "scoring_vol": 20.7
+  },
+  "IND": {
+    "go_rate": 0.262,
+    "rz_td_rate": 0.684,
+    "scoring_vol": 26.0
+  },
+  "JAX": {
+    "go_rate": 0.246,
+    "rz_td_rate": 0.659,
+    "scoring_vol": 25.3
+  },
+  "KC": {
+    "go_rate": 0.26,
+    "rz_td_rate": 0.567,
+    "scoring_vol": 20.8
+  },
+  "LA": {
+    "go_rate": 0.273,
+    "rz_td_rate": 0.692,
+    "scoring_vol": 28.5
+  },
+  "LAC": {
+    "go_rate": 0.18,
+    "rz_td_rate": 0.507,
+    "scoring_vol": 19.5
+  },
+  "LV": {
+    "go_rate": 0.246,
+    "rz_td_rate": 0.556,
+    "scoring_vol": 14.0
+  },
+  "MIA": {
+    "go_rate": 0.204,
+    "rz_td_rate": 0.638,
+    "scoring_vol": 19.0
+  },
+  "MIN": {
+    "go_rate": 0.197,
+    "rz_td_rate": 0.589,
+    "scoring_vol": 18.4
+  },
+  "NE": {
+    "go_rate": 0.212,
+    "rz_td_rate": 0.656,
+    "scoring_vol": 24.2
+  },
+  "NO": {
+    "go_rate": 0.262,
+    "rz_td_rate": 0.5,
+    "scoring_vol": 17.5
+  },
+  "NYG": {
+    "go_rate": 0.315,
+    "rz_td_rate": 0.581,
+    "scoring_vol": 21.3
+  },
+  "NYJ": {
+    "go_rate": 0.295,
+    "rz_td_rate": 0.529,
+    "scoring_vol": 15.1
+  },
+  "PHI": {
+    "go_rate": 0.195,
+    "rz_td_rate": 0.726,
+    "scoring_vol": 20.9
+  },
+  "PIT": {
+    "go_rate": 0.205,
+    "rz_td_rate": 0.636,
+    "scoring_vol": 20.5
+  },
+  "SEA": {
+    "go_rate": 0.093,
+    "rz_td_rate": 0.618,
+    "scoring_vol": 25.7
+  },
+  "SF": {
+    "go_rate": 0.234,
+    "rz_td_rate": 0.68,
+    "scoring_vol": 23.3
+  },
+  "TB": {
+    "go_rate": 0.23,
+    "rz_td_rate": 0.6,
+    "scoring_vol": 21.2
+  },
+  "TEN": {
+    "go_rate": 0.241,
+    "rz_td_rate": 0.61,
+    "scoring_vol": 15.4
+  },
+  "WAS": {
+    "go_rate": 0.248,
+    "rz_td_rate": 0.696,
+    "scoring_vol": 20.0
+  }
+}

@@ -1,0 +1,61 @@
+MASCOT VACATIONERS mock — 12-team Half PPR, YOU = slot 9 'zemaitis touch'
+DNA: real DNA: 13 managers, 12 mapped to seats
+Your picks: [9, 16, 33, 40, 57, 64, 81, 88]
+
+=== R1 | pick #9 ===
+  PICK: Bijan Robinson (RB-ATL) | comp 255.2 VORP 182.5 | 0% survives
+    why: TIER CLIFF (last T1 RB) | FILLS NEED (RB) | WON'T LAST (0% to next pick) | ELITE RZ role (55%)
+    ctx: current team ATL; rushing QB vultures goal-line TDs — RB TD ceiling capped
+    runner-ups: Puka Nacua, Derrick Henry, De'Von Achane, Chase Brown
+    queue: Bijan Robinson(RB) -> Puka Nacua(WR) -> Derrick Henry(RB) -> De'Von Achane(RB)
+=== R2 | pick #16 ===
+  PICK: Derrick Henry (RB-BAL) | comp 155.2 VORP 117.5 | 0% survives
+    why: FILLS NEED (RB) | WON'T LAST (0% to next pick) | ELITE RZ role (68%) | HIGH team total (Vegas 11.5 wins)
+    ctx: rushing QB vultures goal-line TDs — RB TD ceiling capped
+    runner-ups: De'Von Achane, Amon-Ra St. Brown, Ja'Marr Chase, Saquon Barkley
+    queue: Derrick Henry(RB) -> De'Von Achane(RB) -> Amon-Ra St. Brown(WR) -> Ja'Marr Chase(WR)
+=== R3 | pick #33 ===
+  PICK: Amon-Ra St. Brown (WR-DET) | comp 146.8 VORP 87.9 | 0% survives
+    why: TIER CLIFF (last T1 WR) | FILLS NEED (WR) | WON'T LAST (0% to next pick) | DOME boost (100% indoor)
+    ctx: current team DET
+    runner-ups: Omarion Hampton, Drake London, Josh Jacobs, Kyren Williams
+    queue: Amon-Ra St. Brown(WR) -> Omarion Hampton(RB) -> Drake London(WR) -> Josh Jacobs(RB)
+=== R4 | pick #40 ===
+  PICK: Jeremiyah Love (RB-ARI) | comp 126.2 VORP 114.3 | 0% survives
+    why: WON'T LAST (0% to next pick)
+    runner-ups: Cam Skattebo, Travis Etienne Jr., D'Andre Swift, Bucky Irving
+    queue: Jeremiyah Love(RB) -> Cam Skattebo(RB) -> Travis Etienne Jr.(RB) -> Drake London(WR)
+=== R5 | pick #57 ===
+  PICK: Sam LaPorta (TE-DET) | comp 105.8 VORP 87.5 | 100% survives
+    why: TIER CLIFF (last T1 TE) | FILLS NEED (TE) | CAN WAIT (100% survives) | DOME boost (100% indoor)
+    runner-ups: Drake London, J.K. Dobbins, Rico Dowdle, CeeDee Lamb
+    queue: Drake London(WR) -> J.K. Dobbins(RB) -> Rico Dowdle(RB) -> Sam LaPorta(TE)
+=== R6 | pick #64 ===
+  PICK: Drake London (WR-ATL) | comp 100.1 VORP 64.1 | 0% survives
+    why: FILLS NEED (WR) | WON'T LAST (0% to next pick) | DOME boost (100% indoor) | ELITE target share (27%)
+    ctx: current team ATL
+    runner-ups: CeeDee Lamb, Justin Jefferson, George Pickens, Nico Collins
+    queue: Drake London(WR) -> CeeDee Lamb(WR) -> Justin Jefferson(WR) -> George Pickens(WR)
+=== R7 | pick #81 ===
+  PICK: Chris Olave (WR-NO) | comp 83.7 VORP 63.8 | 0% survives
+    why: WON'T LAST (0% to next pick) | SOFT PASS SLATE (B) | DOME boost (100% indoor)
+    runner-ups: Davante Adams, Jameson Williams, Ladd McConkey, Blake Corum
+    queue: Chris Olave(WR) -> Davante Adams(WR) -> Jameson Williams(WR) -> Blake Corum(RB)
+=== R8 | pick #88 ===
+  PICK: Davante Adams (WR-LAR) | comp 81.8 VORP 59.0 | 0% survives
+    why: WON'T LAST (0% to next pick) | SOFT PASS SLATE (A) | DOME boost (100% indoor) | HIGH target share (24%)
+    runner-ups: Jameson Williams, Ladd McConkey, Emeka Egbuka, DeVonta Smith
+    queue: Davante Adams(WR) -> Jameson Williams(WR) -> Blake Corum(RB) -> Ladd McConkey(WR)
+
+=== YOUR ROSTER (8 rounds) ===
+  RB   Bijan Robinson
+  RB   Derrick Henry
+  WR   Amon-Ra St. Brown
+  RB   Jeremiyah Love
+  TE   Sam LaPorta
+  WR   Drake London
+  WR   Chris Olave
+  WR   Davante Adams
+NEEDS: balanced
+HANDCUFFS: Bijan Robinson->Brian Robinson; Derrick Henry->Justice Hill; Jeremiyah Love->Tyler Allgeier
+BYE RISK: wk11(warn)

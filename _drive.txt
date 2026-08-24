@@ -1,0 +1,45 @@
+=== R1 | your pick #11 ===
+  PICK: Jonathan Taylor (RB-IND)  composite 194.7 | VORP 141.3 | 23% survives
+    why: TIER CLIFF (last T1 RB) | FILLS NEED (RB) | WON'T LAST (23% to next pick)
+    queue: Jonathan Taylor(RB) -> Derrick Henry(RB) -> Puka Nacua(WR) -> De'Von Achane(RB)
+=== R2 | your pick #14 ===
+  PICK: Derrick Henry (RB-BAL)  composite 155.2 | VORP 117.5 | 0% survives
+    why: FILLS NEED (RB) | WON'T LAST (0% to next pick) | ELITE RZ role (68%) | HIGH team total (Vegas 11.5 wins)
+    queue: Derrick Henry(RB) -> Puka Nacua(WR) -> De'Von Achane(RB) -> Amon-Ra St. Brown(WR)
+=== R3 | your pick #35 ===
+  PICK: Omarion Hampton (RB-LAC)  composite 115.3 | VORP 91.0 | 17% survives
+    why: WON'T LAST (17% to next pick) | ROOKIE upside | ELITE ATHLETE (RAS 9.4)
+    queue: Omarion Hampton(RB) -> Drake London(WR) -> Josh Jacobs(RB) -> Kyren Williams(RB)
+=== R4 | your pick #38 ===
+  PICK: Josh Jacobs (RB-GB)  composite 108.0 | VORP 97.2 | 0% survives
+    why: WON'T LAST (0% to next pick)
+    queue: Josh Jacobs(RB) -> Drake London(WR) -> Jeremiyah Love(RB) -> CeeDee Lamb(WR)
+=== R5 | your pick #59 ===
+  PICK: Drake London (WR-ATL)  composite 105.8 | VORP 64.1 | 16% survives
+    why: FILLS NEED (WR) | WON'T LAST (16% to next pick) | DOME boost (100% indoor) | ELITE target share (27%)
+    queue: Drake London(WR) -> Rhamondre Stevenson(RB) -> CeeDee Lamb(WR) -> Justin Jefferson(WR)
+=== R6 | your pick #62 ===
+  PICK: J.K. Dobbins (RB-DEN)  composite 99.2 | VORP 80.4 | 18% survives
+    why: TIER CLIFF (last T1 RB) | WON'T LAST (18% to next pick)
+    queue: CeeDee Lamb(WR) -> J.K. Dobbins(RB) -> Justin Jefferson(WR) -> George Pickens(WR)
+=== R7 | your pick #83 ===
+  PICK: Davante Adams (WR-LAR)  composite 83.3 | VORP 52.6 | 16% survives
+    why: FILLS NEED (WR) | WON'T LAST (16% to next pick) | SOFT PASS SLATE (A) | DOME boost (100% indoor)
+    queue: Davante Adams(WR) -> Jameson Williams(WR) -> Tetairoa McMillan(WR) -> Ladd McConkey(WR)
+=== R8 | your pick #86 ===
+  PICK: Jameson Williams (WR-DET)  composite 72.2 | VORP 56.7 | 0% survives
+    why: WON'T LAST (0% to next pick) | DOME boost (100% indoor)
+    queue: Jameson Williams(WR) -> Ladd McConkey(WR) -> Tetairoa McMillan(WR) -> Tee Higgins(WR)
+
+=== ROSTER ===
+  RB   Jonathan Taylor
+  RB   Derrick Henry
+  RB   Omarion Hampton
+  RB   Josh Jacobs
+  WR   Drake London
+  RB   J.K. Dobbins
+  WR   Davante Adams
+  WR   Jameson Williams
+NEEDS: DST(now)
+HANDCUFFS: Derrick Henry->Justice Hill; Omarion Hampton->Keaton Mitchell; Josh Jacobs->MarShawn Lloyd; J.K. Dobbins->RJ Harvey
+BYE RISK: wk11(warn); wk13(warn)

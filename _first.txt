@@ -1,0 +1,21 @@
+pick 1 (slot 1): Jahmyr Gibbs (RB) 39%
+pick 2 (slot 2): Bijan Robinson (RB) 43%
+pick 3 (slot 3): Puka Nacua (WR) 34%
+pick 4 (slot 4): Jonathan Taylor (RB) 34%
+pick 5 (slot 5): Christian McCaffrey (RB) 36%
+pick 6 (slot 6): Ja'Marr Chase (WR) 38%
+pick 7 (slot 7): Jaxon Smith-Njigba (WR) 38%
+pick 8 (slot 8): Derrick Henry (RB) 34%
+pick 9 (slot 9): James Cook III (RB) 35%
+pick 10 (slot 10): Amon-Ra St. Brown (WR) 39%
+---- YOUR PICK (overall 11) predicted board ----
+  likely available/best: De'Von Achane (RB) 40%
+  likely available/best: Ashton Jeanty (RB) 30%
+  likely available/best: Chase Brown (RB) 28%
+---- Edge Engine best-available at 11 (after predicted 1-10 gone) ----
+  De'Von Achane (RB) VORP 128.2 T1 ADP 11.7 :: VALUE +9 vs ADP · TIER CLIFF (last T1 RB) · FILLS NEED (RB)
+  Ashton Jeanty (RB) VORP 115.4 T2 ADP 14.8 :: VALUE +8 vs ADP · FILLS NEED (RB) · ROOKIE upside
+  Saquon Barkley (RB) VORP 112.0 T2 ADP 17.4 :: VALUE +10 vs ADP · TIER CLIFF (last T2 RB) · FILLS NEED (RB)
+  Chase Brown (RB) VORP 115.4 T2 ADP 15.3 :: VALUE +10 vs ADP · FILLS NEED (RB) · CAN WAIT (75% survives)
+  Brock Bowers (TE) VORP 118.6 T1 ADP 43.5 :: VALUE +39 vs ADP · TIER CLIFF (last T1 TE) · FILLS NEED (TE)
+  Trey McBride (TE) VORP 123.0 T1 ADP 38.0 :: VALUE +35 vs ADP · FILLS NEED (TE) · CAN WAIT (100% survives)
