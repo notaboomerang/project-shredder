@@ -483,7 +483,9 @@ if mode == "ESPN live-connect":
                     st.rerun()
 
         st.sidebar.markdown("**Connect to a draft**")
-        league_id = st.sidebar.text_input("ESPN league ID", value=str(league_id or ""))
+        league_id = st.sidebar.text_input("ESPN league ID",
+                                          value=str(league_id or ""),
+                                          key="espn_league_id")
         season = st.sidebar.number_input("Season", 2020, 2030, int(season))
         _dna_seasons_txt = st.sidebar.text_input(
             "Learn opponent DNA from seasons", value="2021,2022,2023,2024,2025",
@@ -496,7 +498,12 @@ if mode == "ESPN live-connect":
                      "just pick a saved league (or change the League ID) and hit "
                      "Connect again.")
         if st.sidebar.button("Connect"):
+            if not str(league_id).strip().isdigit():
+                ss.espn_status = ("Enter a numeric ESPN League ID first "
+                                  "(e.g. 630798), then hit Connect.")
             try:
+                if not str(league_id).strip().isdigit():
+                    raise ValueError("skip")   # guarded above; do nothing
                 cli = EC.EspnClient(int(league_id), int(season),
                                     ss.espn_s2, ss.espn_swid)
                 ok, msg = cli.verify()
@@ -549,8 +556,9 @@ if mode == "ESPN live-connect":
                                 ss["_slot_to_owner"] = {}
                                 ss["_dna_note"] = f"DNA learn failed: {ex}"
             except Exception as ex:  # noqa: BLE001
-                ss.espn = None
-                ss.espn_status = f"Connect failed: {ex}"
+                if str(ex) != "skip":
+                    ss.espn = None
+                    ss.espn_status = f"Connect failed: {ex}"
         if ss.espn_status:
             (st.sidebar.success if ss.espn else st.sidebar.error)(ss.espn_status)
         if ss.get("_dna_note"):
