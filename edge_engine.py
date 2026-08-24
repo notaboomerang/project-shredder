@@ -292,8 +292,20 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
                 # TE fills flex only marginally; 2nd TE eased, 3rd+ crushed
                 composite -= (30.0 if (_flex_room and _have_pos == _start)
                               else 110.0 * over)
-            else:  # RB / WR — flex + bench depth is fine, mild taper
-                composite -= 8.0 * max(0, _have_pos - _start - 1)
+            else:  # RB / WR — starters + ~1 flex is plenty; ramp hard after that
+                # effective RB/WR capacity = starters + (flex counts once, for
+                # whichever of RB/WR you have fewer of). Past that it's bench:
+                # a 4th RB when WR2 is open should sink well below the WR.
+                cap = _start + (1 if _flex_room else 0)     # e.g. RB: 2 + 1 = 3
+                if _have_pos >= cap:
+                    depth_over = _have_pos - cap + 1        # 4th RB -> 1, 5th -> 2
+                    composite -= 45.0 * depth_over
+                    # extra sting if a DIFFERENT skill starter is still unfilled
+                    _other_open = any(needs.get(p, 0) > 0
+                                      for p in ("RB", "WR", "TE")
+                                      if p != pv.position)
+                    if _other_open:
+                        composite -= 35.0
         _inj = INJ.injury_for(pv.name)
         recs.append(Recommendation(
             name=pv.name, position=pv.position, team=pv.team,
