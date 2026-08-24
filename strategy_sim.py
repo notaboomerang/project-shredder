@@ -112,14 +112,25 @@ def _rb_count(roster_positions: list[str]) -> int:
     return sum(1 for p in roster_positions if p == "RB")
 
 
-def _need_caps(roster_positions: list[str], cfg: E.LeagueConfig) -> set:
-    """Positions still DRAFTABLE given what's already on the roster — enforces
-    a sane build (no 8-TE / 4-QB rosters). A position drops out once it hits its
-    cap: QB≤2, TE≤2, DST≤1, K≤1; RB/WR stay open (starters + FLEX + bench)."""
+def _need_caps(roster_positions: list[str], cfg: E.LeagueConfig,
+               strategy: str = "bpa") -> set:
+    """Positions still DRAFTABLE given what's on the roster AND the strategy —
+    enforces a sane, strategy-distinct build. QB≤2, TE≤2, DST≤1, K≤1 always.
+    RB/WR get STRATEGY-AWARE caps so the four builds actually differ:
+      zero-rb  → WR heavy (RB≤3, WR≤7)
+      hero-rb  → one anchor RB then WR (RB≤4, WR≤7)
+      robust-rb→ RB heavy (RB≤7, WR≤5)
+      bpa      → balanced (RB≤6, WR≤6)
+    """
     have = {}
     for p in roster_positions:
         have[p] = have.get(p, 0) + 1
-    caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1}   # RB/WR uncapped
+    rbwr = {
+        "zero-rb":   {"RB": 3, "WR": 7},
+        "hero-rb":   {"RB": 4, "WR": 7},
+        "robust-rb": {"RB": 7, "WR": 5},
+    }.get(strategy, {"RB": 6, "WR": 6})
+    caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1, **rbwr}
     ok = set()
     for pos in ("QB", "RB", "WR", "TE", "DST", "K"):
         if have.get(pos, 0) < caps.get(pos, 99):
@@ -174,7 +185,7 @@ def _allowed_positions(strategy: str, rnd: int, roster_positions: list[str],
         allowed = allowed | set(_LATE_ONLY)
 
     # ---- roster-need gate (the real fix) --------------------------------
-    caps = _need_caps(roster_positions, cfg)
+    caps = _need_caps(roster_positions, cfg, strategy)
     allowed = allowed & caps                       # drop capped positions
 
     # if a STARTER slot is still empty and we're running out of rounds, force it
