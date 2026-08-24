@@ -2114,7 +2114,7 @@ with tab_lab:
         for b in _bad:
             _names = ", ".join(f"{n} ({p})" for n, p in b.players)
             (st.error if b.severity == "danger" else st.warning)(
-                f"**Week {b.week}** — {b.note}  \n<span class='pmeta'>{_names}</span>")
+                f"**Week {b.week}** — {b.note}  \n_{_names}_")
 
     st.markdown("#### 🔗 Same-team clusters")
     _cl = RLAB.stack_clusters(_mr, pool)
