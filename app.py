@@ -1185,10 +1185,30 @@ def _render_opponent_view(pool, cfg, recs, opps, scoring_key, slot, teams,
     """Between YOUR picks — read the room. Who's up, what they'll likely take,
     who to snipe, and a slim on-deck peek at your own best-available."""
     my_slot = int(slot)
+    # Build per-slot loyalty map: this seat's manager → players they've drafted
+    # repeatedly (their 'guys'), so Prophecy predicts the actual player, not just
+    # the position. mgr_dna carries favorite_players; slot_to_owner maps seat→mgr.
+    import re as _re
+
+    def _ln(s):
+        s = (s or "").lower().strip()
+        s = _re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
+        s = _re.sub(r"[^a-z0-9 ]", "", s)
+        return _re.sub(r"\s+", " ", s).strip()
+
+    _loyalty_by_slot = {}
+    _mgr_dna_l = ss.get("_mgr_dna") or {}
+    _s2o_l = ss.get("_slot_to_owner") or {}
+    for _sl, _owner in _s2o_l.items():
+        _d = _mgr_dna_l.get(_owner)
+        if _d and _d.get("favorite_players"):
+            _loyalty_by_slot[int(_sl)] = {_ln(nm): c
+                                          for nm, c in _d["favorite_players"].items()}
     # Prophecy rollout over the upcoming picks
     preds = PROPH.predict_board(pool, cfg, set(ss.drafted),
                                 int(ss.current_overall), opponents=opps,
-                                scoring_key=scoring_key, horizon=int(teams) * 2)
+                                scoring_key=scoring_key, horizon=int(teams) * 2,
+                                loyalty_by_slot=_loyalty_by_slot)
 
     # 1) the manager on the clock + their most-likely target
     _who = on_clock_name or f"slot {on_clock_slot}"

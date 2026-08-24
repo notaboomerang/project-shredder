@@ -44,8 +44,12 @@ class Snipe:
 
 
 def _score_candidate(pv: E.PlayerValue, adp: Optional[float], overall: int,
-                     prof) -> float:
-    """How much this manager wants this player at this pick."""
+                     prof, loyalty_mult: float = 1.0) -> float:
+    """How much this manager wants this player at this pick.
+
+    `loyalty_mult` > 1 when this player is one of the manager's repeat-drafted
+    'guys' (from draft history) — a named-player pull on top of the positional
+    tendency, so Prophecy predicts the actual human, not just the position."""
     import math
     # ADP proximity: peaks when the pick number is near/after the player's ADP
     if adp is not None:
@@ -57,15 +61,30 @@ def _score_candidate(pv: E.PlayerValue, adp: Optional[float], overall: int,
         base *= prof.pos_multiplier(pv.position, None, False)
     if pv.position in ("K", "DST"):
         base *= 0.03 if overall < 130 else 1.5   # only late
+    base *= loyalty_mult
     return base
 
 
 def predict_board(pool, cfg: E.LeagueConfig, drafted: set,
                   current_overall: int, opponents=None,
-                  scoring_key: str = "half", horizon: int = 24) -> list[Prediction]:
+                  scoring_key: str = "half", horizon: int = 24,
+                  loyalty_by_slot: Optional[dict] = None) -> list[Prediction]:
     """Predict the next `horizon` picks. Greedy: at each pick, assign the
     manager's most likely target and remove it (so downstream predictions
-    account for it), like a most-likely-path rollout."""
+    account for it), like a most-likely-path rollout.
+
+    `loyalty_by_slot`: {slot: {normalized_player_name: times_drafted}} — a
+    manager's repeat-drafted 'guys' get a named-player boost, so the crystal
+    ball predicts the actual player they keep taking, not just the position."""
+    import re
+
+    def _norm(s):
+        s = (s or "").lower().strip()
+        s = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
+        s = re.sub(r"[^a-z0-9 ]", "", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    loyalty_by_slot = loyalty_by_slot or {}
     # available pool scored + VORP'd
     pvs = []
     raw_by_name = {}
@@ -83,15 +102,20 @@ def predict_board(pool, cfg: E.LeagueConfig, drafted: set,
     for ov in range(current_overall, current_overall + horizon):
         slot = _snake_slot(ov, teams)
         prof = opponents.profiles.get(slot) if opponents else None
+        loyal = loyalty_by_slot.get(slot, {})    # {norm_name: count}
         scored = []
         for nm, pv in avail.items():
             adp = P.adp_for(raw_by_name[nm], scoring_key)
+            # loyalty: a manager who drafts 'their guy' every year will REACH
+            # for him. 2x drafted → strong pull, 3x+ → they take him on sight.
+            lc = loyal.get(_norm(nm), 0)
+            lmult = 1.0 + (2.5 * lc) if lc >= 2 else 1.0
             scored.append((nm, pv.position,
-                           _score_candidate(pv, adp, ov, prof)))
+                           _score_candidate(pv, adp, ov, prof, lmult), lc))
         scored.sort(key=lambda x: x[2], reverse=True)
         top_raw = scored[:3]
-        tot = sum(s for _, _, s in top_raw) or 1.0
-        top = [(nm, pos, round(s / tot, 2)) for nm, pos, s in top_raw]
+        tot = sum(s for _, _, s, _ in top_raw) or 1.0
+        top = [(nm, pos, round(s / tot, 2)) for nm, pos, s, _ in top_raw]
         preds.append(Prediction(overall=ov, slot=slot,
                                  is_me=(slot == cfg.draft_slot), top=top))
         # consume the most-likely target on the greedy path
