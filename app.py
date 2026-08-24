@@ -1476,8 +1476,15 @@ with tab_sim:
                                 f"proj starting pts: {res.get('total_points','?')}")
                     if res.get("summary"):
                         st.caption(res["summary"])
+                    # map player name -> "R{round} · P{overall}" from the pick log
+                    _tm = int(teams)
+                    _when = {}
+                    for _ov, _nm, _ps in res.get("picks", []):
+                        _rd = (_ov - 1) // _tm + 1
+                        _when[_nm] = f"R{_rd} · P{_ov}"
                     if res.get("lineup"):
-                        st.write({slot: f"{v[0]} ({v[1]}) {v[2]}pts"
+                        st.write({slot: (f"{v[0]} ({v[1]}) {v[2]}pts"
+                                         f"  —  {_when.get(v[0], '')}")
                                   for slot, v in res["lineup"].items()})
                 # --- all 12 projected teams (opponents drafted by their DNA) ---
                 teams = res.get("all_teams") or []
@@ -1489,9 +1496,15 @@ with tab_sim:
                             tag = " 👈 YOU" if t["is_me"] else ""
                             st.markdown(f"**{ti}. {t['owner']}{tag}** — "
                                         f"{t['total_points']:.0f} proj starting pts")
-                            st.write({slot: f"{v[0]} ({v[1]})"
-                                      for slot, v in t["lineup"].items()
-                                      if v[0]})
+                            if t["is_me"]:
+                                st.write({slot: (f"{v[0]} ({v[1]})  —  "
+                                                 f"{_when.get(v[0], '')}")
+                                          for slot, v in t["lineup"].items()
+                                          if v[0]})
+                            else:
+                                st.write({slot: f"{v[0]} ({v[1]})"
+                                          for slot, v in t["lineup"].items()
+                                          if v[0]})
         except Exception as ex:  # noqa: BLE001
             st.error(f"Sim error: {ex}")
 
