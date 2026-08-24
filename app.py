@@ -1441,12 +1441,13 @@ with tab_opp:
 
 # --------------------------------------------------------------------------- strategy sim
 with tab_sim:
-    st.subheader("Strategy simulator — best build from your slot")
-    st.caption("Simulates Zero-RB / Hero-RB / Robust-RB / Best-Player-Available "
-               "from your exact draft slot. Opponents draft through the CRYSTAL "
-               "BALL — each seat's learned DNA + loyalty picks + ADP — so "
-               "'who's left at your pick' mirrors your real league, then ranks "
-               "the strategies by projected starting-lineup points.")
+    st.subheader("Optimal build — the best team you can draft from your slot")
+    st.caption("Your opponents draft realistically off each seat's learned DNA "
+               "+ loyalty picks + ADP (the crystal ball), so 'who's left at your "
+               "pick' mirrors your real league. At every one of YOUR picks the sim "
+               "takes the player that adds the most to your projected starting "
+               "lineup — the highest-scoring team you can actually assemble, not a "
+               "rigid strategy template.")
     if st.button("Run simulation"):
         try:
             # crystal-ball opponents: build the per-slot loyalty map (same as

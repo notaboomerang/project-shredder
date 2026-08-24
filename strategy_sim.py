@@ -232,6 +232,51 @@ def _pick_for_strategy(cands: list[_Candidate], strategy: str, rnd: int,
     return picks[0]
 
 
+def _pick_best_lineup_value(cands, my_picked, rnd, cfg):
+    """YOUR pick = whatever ADDS THE MOST to your projected STARTING lineup, not
+    a rigid strategy template. For each candidate, rebuild your best legal
+    lineup with that player added and keep the one that maximizes total starting
+    points (a 3rd RB only helps if it beats your current RB2/FLEX, etc.). This is
+    marginal-starter-value: genuinely optimal for scoring the most every week.
+
+    Sanity rails kept: K/DST only in the last two rounds and never a 2nd of
+    either; a 2nd QB / 3rd TE never beats a starter upgrade so it's naturally
+    avoided, but we hard-skip them unless a starter slot is empty."""
+    if not cands:
+        return None
+    late = rnd >= cfg.rounds - 1
+    have = {}
+    for c in my_picked:
+        have[c.position] = have.get(c.position, 0) + 1
+    st = cfg.starters
+    base_lineup, base_total = _build_lineup(my_picked, cfg)
+
+    caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1}
+    best, best_gain = None, -1e9
+    for c in cands:
+        pos = c.position
+        # discipline rails
+        if pos in _LATE_ONLY and not late:
+            continue
+        if have.get(pos, 0) >= caps.get(pos, 99):
+            continue
+        # a 2nd QB is never a starting-lineup upgrade — skip unless QB slot empty
+        if pos == "QB" and have.get("QB", 0) >= st.get("QB", 1):
+            continue
+        # marginal value = new best lineup total minus current
+        _, new_total = _build_lineup(my_picked + [c], cfg)
+        gain = new_total - base_total
+        # tiny ADP tiebreaker so equal-gain picks prefer the higher-ranked player
+        gain += (1.0 / ((c.adp or 400) + 5)) * 0.001
+        if gain > best_gain:
+            best, best_gain = c, gain
+    if best is None:                 # everything capped → best remaining by points
+        pool = [c for c in cands if late or c.position not in _LATE_ONLY] or list(cands)
+        pool.sort(key=lambda c: (-c.proj_points, c.name))
+        return pool[0]
+    return best
+
+
 def _pick_adp_best(cands: list[_Candidate], cfg: E.LeagueConfig,
                    rnd: int) -> Optional[_Candidate]:
     """Model an opposing team: take the ADP-best available skill player,
@@ -419,8 +464,9 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
             break
         rnd = _round_of(sim_cfg, overall)
         if overall in my_picks:
-            chosen = _pick_for_strategy(remaining, strategy, rnd,
-                                        my_positions, sim_cfg)
+            # YOUR pick = maximize projected starting-lineup points from the
+            # available board (best-lineup-value), NOT a rigid strategy template.
+            chosen = _pick_best_lineup_value(remaining, my_picked, rnd, sim_cfg)
             if chosen is not None:
                 my_picked.append(chosen)
                 my_positions.append(chosen.position)
@@ -454,16 +500,15 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
 def compare_strategies(pool: list, cfg: E.LeagueConfig,
                        scoring_key: str, opponents=None,
                        loyalty_by_slot=None) -> list[dict]:
-    """Run all four strategies and rank them by starting-lineup points desc.
-    Opponents draft via the crystal ball (DNA + loyalty) when provided."""
-    results = [simulate_strategy(pool, cfg, s, scoring_key,
-                                 opponents=opponents,
-                                 loyalty_by_slot=loyalty_by_slot)
-               for s in STRATEGIES]
-    results.sort(key=lambda r: (-r["total_points"], r["strategy"]))
-    for rank, r in enumerate(results, start=1):
-        r["rank"] = rank
-    return results
+    """Return the SINGLE optimal build: your picks maximize projected
+    starting-lineup points at every turn, while opponents draft realistically
+    off their DNA + loyalty + ADP. (No longer four rigid strategy templates —
+    the sim just finds the best team you can actually assemble from your slot.)"""
+    r = simulate_strategy(pool, cfg, "bpa", scoring_key,
+                          opponents=opponents, loyalty_by_slot=loyalty_by_slot)
+    r["strategy"] = "optimal"
+    r["rank"] = 1
+    return [r]
 
 
 # ---------------------------------------------------------------------------
