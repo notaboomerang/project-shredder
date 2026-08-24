@@ -134,14 +134,30 @@ def best_pair(pool, cfg: E.LeagueConfig, drafted: set, current_overall: int,
         pvs.append(E.PlayerValue(raw.name, raw.name, raw.position, raw.team, pts))
     E.compute_vorp(pvs, cfg)
     vorp = {pv.name: pv.vorp for pv in pvs}
+    # streaming discount so single-start positions (QB/TE/DST/K) don't dominate
+    # the take-now slot on raw VORP — an elite RB/WR should lead the wheel.
+    _disc = {"QB": 0.35, "TE": 0.6, "DST": 0.1, "K": 0.05}
+    def _wv(v):
+        return vorp.get(v.name, 0) * _disc.get(v.position, 1.0)
     now_cands = [v for v in verdicts if v.verdict == "TAKE NOW"]
     wait_cands = [v for v in verdicts if v.verdict in ("CAN WAIT", "TOSS-UP")]
-    now_cands.sort(key=lambda v: vorp.get(v.name, 0), reverse=True)
-    wait_cands.sort(key=lambda v: vorp.get(v.name, 0), reverse=True)
+    now_cands.sort(key=_wv, reverse=True)
+    wait_cands.sort(key=_wv, reverse=True)
     now = now_cands[0] if now_cands else (verdicts[0] if verdicts else None)
-    wait = next((w for w in wait_cands if not now or w.name != now.name), None)
     if not now:
         return None
+    # The wheel-back pick must COMPLEMENT the take-now pick, not duplicate a
+    # single-start slot. You only start one QB/TE/DST/K, so a take-now QB should
+    # never pair with a wheel-back QB. Skip same-position (for single-start
+    # positions) and always skip the exact same player.
+    SINGLE = {"QB", "TE", "DST", "K"}
+    def _ok_wheel(w):
+        if not now or w.name == now.name:
+            return False
+        if now.position in SINGLE and w.position == now.position:
+            return False          # no 2nd QB/TE/DST/K on the wheel
+        return True
+    wait = next((w for w in wait_cands if _ok_wheel(w)), None)
     combined = vorp.get(now.name, 0) + (vorp.get(wait.name, 0) if wait else 0)
     return {
         "take_now": (now.name, now.position, round(vorp.get(now.name, 0), 1)),
