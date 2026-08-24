@@ -848,7 +848,23 @@ elif _ma == "restart_with_dna":
 
 # --------------------------------------------------------------------------- board
 def _render_board():
-    roster = X.Roster(players=list(ss.my_roster))
+    # Build the roster the engine sees from the MOST COMPLETE source. Picks can
+    # land via _record_pick (my_roster) OR the ESPN sync / mock (team_rosters
+    # under my slot). If sync recorded my pick to team_rosters but slot-matching
+    # missed my_roster, the surplus penalty would see an empty roster and wrongly
+    # recommend a position I've already filled (the '3rd TE' bug). Merge both,
+    # deduped, so the engine always knows my true roster.
+    _mine = list(ss.my_roster)
+    _seen = {n for n, _ in _mine}
+    _my_slot_int = int(slot) if str(slot).isdigit() else None
+    _tr = ss.team_rosters.get(_my_slot_int, []) if _my_slot_int else []
+    _name_pos = {r.name: r.position for r in pool}
+    for _nm in _tr:
+        if _nm not in _seen:
+            _pos = _name_pos.get(_nm)
+            if _pos:
+                _mine.append((_nm, _pos)); _seen.add(_nm)
+    roster = X.Roster(players=_mine)
     recs = X.recommend(pool, cfg, roster, set(ss.drafted),
                        current_overall=int(ss.current_overall),
                        scoring_key=scoring_key, top_n=40, opponents=opps,
