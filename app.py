@@ -312,7 +312,21 @@ if mode == "Mock draft (practice)":
     if mc[1].button("⏭️ Bots to my pick"):
         ss["_mock_action"] = "advance"
     st.sidebar.markdown("**Mock vs. your REAL league** 😈")
-    _ml_league = st.sidebar.text_input("League ID (for DNA)", key="mock_league")
+    # pick from your saved leagues (or type an ID manually)
+    _mk_saved = SL.load()
+    _mk_id = ""
+    if _mk_saved:
+        _mk_opts = ["— type an ID below —"] + [SL.display_label(e) for e in _mk_saved]
+        _mk_pick = st.sidebar.selectbox("Mock against saved league", _mk_opts,
+                                        key="mock_league_pick")
+        if _mk_pick != _mk_opts[0]:
+            _idx = _mk_opts.index(_mk_pick) - 1
+            _mk_id = str(_mk_saved[_idx].get("league_id", ""))
+    # manual entry (used when no saved pick, or none saved yet)
+    _typed = st.sidebar.text_input("League ID (for DNA)",
+                                   value=_mk_id, key="mock_league")
+    _ml_league = _mk_id or _typed
+    ss["_mock_league_resolved"] = _ml_league
     _ml_seasons = st.sidebar.text_input("Past seasons", value="2021,2022,2023,2024,2025",
                                         key="mock_seasons")
     if st.sidebar.button("🧬 Load opponents from history + start mock"):
@@ -793,7 +807,11 @@ elif _ma == "advance":
 elif _ma == "restart_with_dna":
     # 1) learn each manager's DNA from real past drafts into opps profiles
     try:
-        _lid = ss.get("mock_league", "")
+        _lid = ss.get("_mock_league_resolved") or ss.get("mock_league", "")
+        if not str(_lid).strip().isdigit():
+            ss["_mock_dna_note"] = ("Pick a saved league (or type a numeric "
+                                    "League ID) first, then start the mock.")
+            raise ValueError("skip")
         _seas = [int(x) for x in ss.get("mock_seasons", "2021,2022,2023,2024,2025").split(",")
                  if x.strip()]
         _drafts = LH.pull_past_drafts(int(_lid), _seas,
@@ -814,15 +832,17 @@ elif _ma == "restart_with_dna":
             ss["_mock_dna_note"] = ("No history found — mock uses default bot "
                                     "tendencies (set styles in Opponents tab).")
     except Exception as ex:  # noqa: BLE001
-        ss["_mock_dna_note"] = f"DNA load failed ({ex}); using default bots."
-    # 2) start the mock against those opponents
-    ss.drafted = set(); ss.my_roster = []; ss.team_rosters = {}
-    ss.pick_log = []; ss.undo_stack = []; ss.regret = []
-    ss.current_overall = 1; ss["_mock_on"] = True
-    _r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
-                                 int(ss.current_overall), opponents=opps,
-                                 pick_log=ss.pick_log)
-    ss.current_overall = _r["now_overall"]
+        if str(ex) != "skip":
+            ss["_mock_dna_note"] = f"DNA load failed ({ex}); using default bots."
+    # 2) start the mock against those opponents — only if the ID was valid
+    if str(ss.get("_mock_league_resolved") or ss.get("mock_league", "")).strip().isdigit():
+        ss.drafted = set(); ss.my_roster = []; ss.team_rosters = {}
+        ss.pick_log = []; ss.undo_stack = []; ss.regret = []
+        ss.current_overall = 1; ss["_mock_on"] = True
+        _r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
+                                     int(ss.current_overall), opponents=opps,
+                                     pick_log=ss.pick_log)
+        ss.current_overall = _r["now_overall"]
     st.rerun()
 
 
