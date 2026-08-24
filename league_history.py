@@ -49,7 +49,8 @@ def pull_past_drafts(league_id: int, seasons: list[int], espn_s2: str = "",
                      swid: str = "") -> list[list[dict]]:
     """Return a list of past drafts; each draft is a list of pick dicts with
     keys: slot, position, round, pro_team_id, rookie, manager (persistent
-    owner id), manager_name. Empty on failure."""
+    owner id), manager_name, name (drafted player name), season, overall.
+    Empty on failure."""
     if EC is None:
         return []
     # lineupSlotId -> position fallback (ESPN slot ids)
@@ -65,6 +66,7 @@ def pull_past_drafts(league_id: int, seasons: list[int], espn_s2: str = "",
             pos_map: dict[int, str] = {}
             proteam_map: dict[int, int] = {}
             rookie_map: dict[int, bool] = {}
+            name_map: dict[int, str] = {}
             try:
                 kona = cli._get_with_fallback(["kona_player_info"])
                 for pe in (kona.get("players") or []):
@@ -74,6 +76,9 @@ def pull_past_drafts(league_id: int, seasons: list[int], espn_s2: str = "",
                         continue
                     pos_map[int(pid_)] = _POS.get(pp.get("defaultPositionId"))
                     proteam_map[int(pid_)] = pp.get("proTeamId")
+                    nm_ = pp.get("fullName") or pp.get("name")
+                    if nm_:
+                        name_map[int(pid_)] = nm_
             except Exception:
                 pass
             picks = (data.get("draftDetail") or {}).get("picks") or []
@@ -109,12 +114,65 @@ def pull_past_drafts(league_id: int, seasons: list[int], espn_s2: str = "",
                     "pro_team_id": proteam_map.get(int(pid)) if pid else None,
                     "rookie": rookie_map.get(int(pid), False) if pid else False,
                     "manager": owner, "manager_name": owner_name.get(owner, str(owner)),
+                    "name": name_map.get(int(pid)) if pid else None,
+                    "season": season, "overall": overall,
                 })
             if draft:
                 drafts.append(draft)
         except Exception:
             continue
     return drafts
+
+
+def _norm_name(s: str) -> str:
+    """Normalize a player name for matching (lowercase, strip suffix/punct)."""
+    import re
+    s = (s or "").lower().strip()
+    s = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def player_draft_history(drafts: list[list[dict]]) -> dict:
+    """Who DRAFTED each player, by year (from draft picks, NOT end-of-season
+    ownership). Returns {normalized_name: {"display": <name>, "events":
+    [{"manager": id, "manager_name": nm, "season": yr, "round": r,
+    "overall": o}], "by_manager": {manager_name: count}}}.
+
+    Use to answer 'who has drafted this player before?' and to power a
+    per-player loyalty snipe alert in the app."""
+    from collections import Counter
+    hist: dict = {}
+    for draft in drafts:
+        for pick in draft:
+            nm = pick.get("name")
+            if not nm:
+                continue
+            key = _norm_name(nm)
+            if not key:
+                continue
+            entry = hist.setdefault(key, {"display": nm, "events": [],
+                                          "by_manager": Counter()})
+            entry["events"].append({
+                "manager": pick.get("manager"),
+                "manager_name": pick.get("manager_name", str(pick.get("manager"))),
+                "season": pick.get("season"),
+                "round": pick.get("round"),
+                "overall": pick.get("overall"),
+            })
+            entry["by_manager"][pick.get("manager_name",
+                                         str(pick.get("manager")))] += 1
+    # finalize: sort events newest-first, convert Counter to plain dict
+    for entry in hist.values():
+        entry["events"].sort(key=lambda e: (e.get("season") or 0), reverse=True)
+        entry["by_manager"] = dict(entry["by_manager"].most_common())
+    return hist
+
+
+def lookup_player_history(hist: dict, player_name: str) -> dict | None:
+    """Look up one player's draft history from the player_draft_history() map.
+    Normalizes the name so 'Derrick Henry' matches regardless of suffix/case."""
+    return hist.get(_norm_name(player_name)) if hist else None
 
 
 def learn_dna(drafts: list[list[dict]]) -> dict[int, ManagerDNA]:
@@ -205,6 +263,7 @@ def learn_dna_by_manager(drafts: list[list[dict]]) -> dict:
     rookie = defaultdict(lambda: [0, 0])
     seasons_ct = defaultdict(set)
     names = {}
+    player_ct = defaultdict(Counter)     # mgr -> Counter(player_name)
 
     for si, draft in enumerate(drafts):
         for pick in draft:
@@ -220,6 +279,8 @@ def learn_dna_by_manager(drafts: list[list[dict]]) -> dict:
                 season_early_total[mgr][si] += 1
             if pick.get("pro_team_id"):
                 teams_ct[mgr][pick["pro_team_id"]] += 1
+            if pick.get("name"):
+                player_ct[mgr][pick["name"]] += 1
             rookie[mgr][1] += 1
             if pick.get("rookie"):
                 rookie[mgr][0] += 1
@@ -271,13 +332,19 @@ def learn_dna_by_manager(drafts: list[list[dict]]) -> dict:
 
         lean = ", ".join(f"{p} {share[p]*100:.0f}%"
                          for p in sorted(share, key=share.get, reverse=True)[:3]) or "balanced"
+        # players this manager drafted MORE THAN ONCE = their loyalty picks
+        fav_players = {nm: c for nm, c in player_ct[mgr].most_common() if c >= 2}
+        fav_str = ", ".join(f"{nm} ({c}x)"
+                            for nm, c in list(fav_players.items())[:5])
         doss = (f"{names[mgr]}: {n_seasons} seasons. Early-round lean: {lean}. "
                 f"Avg early RB {avg_rb:.1f}/WR {avg_wr:.1f}/QB {avg_qb:.1f}/TE {avg_te:.1f}. "
                 f"Rookie rate {int(rr*100)}%."
-                + (f" Homer proTeam {fav_id} ({fav_ct}x)." if fav_ct >= 4 else ""))
+                + (f" Homer proTeam {fav_id} ({fav_ct}x)." if fav_ct >= 4 else "")
+                + (f" Loyalty picks: {fav_str}." if fav_str else ""))
         out[mgr] = {"manager_name": names[mgr], "tendencies": tags,
                     "rookie_rate": rr,
                     "fav_team_id": fav_id if fav_ct >= 4 else None,
+                    "favorite_players": fav_players,
                     "seasons": n_seasons, "dossier": doss,
                     "early_share": {k: round(v, 2) for k, v in share.items()}}
     return out

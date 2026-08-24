@@ -535,6 +535,9 @@ if mode == "ESPN live-connect":
                                                                ss.espn_s2, ss.espn_swid)
                                 ss["_mgr_dna"] = mgr_dna
                                 ss["_slot_to_owner"] = s2o
+                                # who DRAFTED each player, by year (not EOY ownership)
+                                ss["_draft_hist"] = (LH.player_draft_history(drafts)
+                                                     if drafts else {})
                                 _learned = sum(1 for d in mgr_dna.values()
                                                if d["tendencies"] != ["ADP-robot"])
                                 ss["_dna_note"] = (
@@ -789,6 +792,7 @@ elif _ma == "restart_with_dna":
                                       ss.get("espn_s2", ""), ss.get("espn_swid", ""))
         if _drafts:
             _mgr = LH.learn_dna_by_manager(_drafts)
+            ss["_draft_hist"] = LH.player_draft_history(_drafts)
             _so = LH.current_slot_to_owner(int(_lid), 2026,
                                            ss.get("espn_s2", ""), ss.get("espn_swid", ""))
             if _so:
@@ -1116,6 +1120,24 @@ def _render_my_pick_view(pool, cfg, recs, opps, scoring_key, prefer_floor,
                     cols[4].markdown(
                         "".join(f'<span class="pmeta" style="color:{_tdcol};">🧭 {n}</span><br>'
                                 for n in _sit["notes"]),
+                        unsafe_allow_html=True)
+                # 🎯 DRAFT LOYALTY — who DRAFTED this player in past years (not
+                # end-of-year ownership). Powered by player_draft_history.
+                _dh = ss.get("_draft_hist") or {}
+                _hist = LH.lookup_player_history(_dh, r.name) if _dh else None
+                if _hist and _hist.get("events"):
+                    _by = _hist["by_manager"]           # {manager_name: count}
+                    _parts = []
+                    for _mgr_nm, _c in list(_by.items())[:3]:
+                        _yrs = sorted({e["season"] for e in _hist["events"]
+                                       if e["manager_name"] == _mgr_nm and e["season"]},
+                                      reverse=True)
+                        _yrtxt = ", ".join(str(y) for y in _yrs)
+                        _loyal = " 🔁" if _c >= 2 else ""
+                        _parts.append(f"{_mgr_nm} ({_yrtxt}){_loyal}")
+                    cols[4].markdown(
+                        '<span class="pmeta" style="color:#a78bfa;">🎯 Drafted by: '
+                        + "; ".join(_parts) + '</span>',
                         unsafe_allow_html=True)
                 if r.position in ("RB", "WR", "TE", "QB") and not SIT.has_context(r.name):
                     if cols[4].button("🔎 Deep read", key=f"deep_{r.name}",
