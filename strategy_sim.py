@@ -232,16 +232,52 @@ def _pick_for_strategy(cands: list[_Candidate], strategy: str, rnd: int,
     return picks[0]
 
 
-def _pick_best_lineup_value(cands, my_picked, rnd, cfg):
-    """YOUR pick = whatever ADDS THE MOST to your projected STARTING lineup, not
-    a rigid strategy template. For each candidate, rebuild your best legal
-    lineup with that player added and keep the one that maximizes total starting
-    points (a 3rd RB only helps if it beats your current RB2/FLEX, etc.). This is
-    marginal-starter-value: genuinely optimal for scoring the most every week.
+def _replacement_baselines(cands, cfg):
+    """Approx replacement-level projected points per position = the projection
+    of the LAST starter-worthy player at that position across the league. Used
+    so marginal value is measured OVER what you'd get later anyway (why a lone
+    elite QB isn't worth a round-1 pick — QB replacement is high)."""
+    teams = cfg.teams
+    st = cfg.starters
+    # rough starters-needed leaguewide per position (flex adds ~half to RB/WR)
+    need = {
+        "QB": st.get("QB", 1) * teams,
+        "RB": int((st.get("RB", 2) + 0.6 * st.get("FLEX", 1)) * teams),
+        "WR": int((st.get("WR", 2) + 0.4 * st.get("FLEX", 1)) * teams),
+        "TE": st.get("TE", 1) * teams,
+        "K": st.get("K", 1) * teams,
+        "DST": st.get("DST", 1) * teams,
+    }
+    by_pos = {}
+    for c in cands:
+        by_pos.setdefault(c.position, []).append(c.proj_points)
+    base = {}
+    for pos, pts in by_pos.items():
+        pts.sort(reverse=True)
+        idx = min(need.get(pos, len(pts)), len(pts)) - 1
+        base[pos] = pts[max(0, idx)] if pts else 0.0
+    # STREAMABLE positions: you start only ONE and a top-tier late option scores
+    # nearly as much, so their value-over-replacement should be SMALL. Set their
+    # replacement to a SHALLOW rank (near the best) = a HIGH points floor, which
+    # collapses elite-QB / elite-DST VOR. E.g. QB replacement = ~QB6's points, so
+    # Josh Allen's edge over a streamed QB is small and RB/WR win round 1.
+    shallow = {"QB": 6, "TE": 6, "DST": 4, "K": 4}
+    for pos, rank in shallow.items():
+        pts = by_pos.get(pos)
+        if pts:
+            base[pos] = pts[min(rank, len(pts)) - 1]
+    return base
 
-    Sanity rails kept: K/DST only in the last two rounds and never a 2nd of
-    either; a 2nd QB / 3rd TE never beats a starter upgrade so it's naturally
-    avoided, but we hard-skip them unless a starter slot is empty."""
+
+def _pick_best_lineup_value(cands, my_picked, rnd, cfg):
+    """YOUR pick = whatever adds the most VALUE OVER REPLACEMENT to your starting
+    lineup — not raw points, and not a strategy template. Measuring over
+    replacement is why a lone elite QB (you start one, and QB12 still scores ~300)
+    doesn't win round 1 over a scarce elite RB. A 3rd RB only counts if it beats
+    your current RB2/FLEX. This is genuinely optimal weekly scoring.
+
+    Rails: K/DST only the last two rounds, one each; never a 2nd QB / 3rd TE
+    unless a starter slot is still empty."""
     if not cands:
         return None
     late = rnd >= cfg.rounds - 1
@@ -250,6 +286,7 @@ def _pick_best_lineup_value(cands, my_picked, rnd, cfg):
         have[c.position] = have.get(c.position, 0) + 1
     st = cfg.starters
     base_lineup, base_total = _build_lineup(my_picked, cfg)
+    repl = _replacement_baselines(cands, cfg)
 
     caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1}
     best, best_gain = None, -1e9
@@ -263,9 +300,17 @@ def _pick_best_lineup_value(cands, my_picked, rnd, cfg):
         # a 2nd QB is never a starting-lineup upgrade — skip unless QB slot empty
         if pos == "QB" and have.get("QB", 0) >= st.get("QB", 1):
             continue
-        # marginal value = new best lineup total minus current
+        # raw lineup improvement from adding this player
         _, new_total = _build_lineup(my_picked + [c], cfg)
-        gain = new_total - base_total
+        raw_gain = new_total - base_total
+        # VALUE OVER REPLACEMENT: discount by how good a late/streamed option at
+        # this position would be. If the pick doesn't even crack the lineup
+        # (raw_gain 0), it stays 0. Scarce positions (RB/WR) keep most of their
+        # gain; deep/streamable ones (QB/TE/K/DST) shrink toward zero.
+        if raw_gain > 0:
+            gain = raw_gain - repl.get(pos, 0.0)
+        else:
+            gain = raw_gain          # bench depth: judged on raw contribution
         # tiny ADP tiebreaker so equal-gain picks prefer the higher-ranked player
         gain += (1.0 / ((c.adp or 400) + 5)) * 0.001
         if gain > best_gain:
@@ -452,6 +497,7 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
     my_positions: list[str] = []
     pick_log: list[tuple] = []
     opp_positions: dict[int, list[str]] = {}   # slot -> [positions] for bots
+    opp_picked: dict[int, list] = {}           # slot -> [_Candidate] for bots
 
     def _slot_of(ov):
         r = (ov - 1) // sim_cfg.teams + 1
@@ -482,11 +528,34 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
                                     _prof, _loyal, _opos)
             if chosen is not None:
                 _opos.append(chosen.position)
+                opp_picked.setdefault(_sl, []).append(chosen)
         if chosen is not None:
             avail.pop(chosen.name, None)
 
     lineup, total = _build_lineup(my_picked, sim_cfg)
     summary = _summarize(strategy, pick_log, lineup, total)
+
+    # build every OPPONENT team's roster + lineup (owner DNA drove their picks)
+    all_teams = []
+    my_slot = sim_cfg.draft_slot
+    for sl in range(1, sim_cfg.teams + 1):
+        if sl == my_slot:
+            tl, tt = lineup, total
+            picks = [(p[1], p[2]) for p in pick_log]
+            owner = "YOU"
+        else:
+            picked = opp_picked.get(sl, [])
+            tl, tt = _build_lineup(picked, sim_cfg)
+            picks = [(c.name, c.position) for c in picked]
+            owner = None
+            if opponents and hasattr(opponents, "profiles"):
+                prof = opponents.profiles.get(sl)
+                owner = getattr(prof, "name", None) if prof else None
+            owner = owner or f"Slot {sl}"
+        all_teams.append({
+            "slot": sl, "owner": owner, "is_me": sl == my_slot,
+            "lineup": tl, "total_points": tt, "picks": picks,
+        })
 
     return {
         "strategy": strategy,
@@ -494,6 +563,7 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
         "lineup": lineup,
         "total_points": total,
         "summary": summary,
+        "all_teams": all_teams,
     }
 
 

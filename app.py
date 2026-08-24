@@ -1472,13 +1472,26 @@ with tab_sim:
                                              opponents=opps, loyalty_by_slot=_loy)
             for res in results:
                 with st.container(border=True):
-                    st.markdown(f"**#{res.get('rank','?')} {res.get('strategy','?').upper()}** — "
+                    st.markdown(f"**⭐ OPTIMAL BUILD** — "
                                 f"proj starting pts: {res.get('total_points','?')}")
                     if res.get("summary"):
                         st.caption(res["summary"])
                     if res.get("lineup"):
                         st.write({slot: f"{v[0]} ({v[1]}) {v[2]}pts"
                                   for slot, v in res["lineup"].items()})
+                # --- all 12 projected teams (opponents drafted by their DNA) ---
+                teams = res.get("all_teams") or []
+                if teams:
+                    ranked = sorted(teams, key=lambda t: -t["total_points"])
+                    with st.expander(f"📋 All {len(teams)} projected rosters "
+                                     f"(opponents drafted by their owner DNA)"):
+                        for ti, t in enumerate(ranked, 1):
+                            tag = " 👈 YOU" if t["is_me"] else ""
+                            st.markdown(f"**{ti}. {t['owner']}{tag}** — "
+                                        f"{t['total_points']:.0f} proj starting pts")
+                            st.write({slot: f"{v[0]} ({v[1]})"
+                                      for slot, v in t["lineup"].items()
+                                      if v[0]})
         except Exception as ex:  # noqa: BLE001
             st.error(f"Sim error: {ex}")
 
