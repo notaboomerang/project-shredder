@@ -1435,11 +1435,32 @@ with tab_opp:
 with tab_sim:
     st.subheader("Strategy simulator — best build from your slot")
     st.caption("Simulates Zero-RB / Hero-RB / Robust-RB / Best-Player-Available "
-               "from your exact draft slot (others draft ~ADP) and ranks them by "
-               "projected starting-lineup points.")
+               "from your exact draft slot. Opponents draft through the CRYSTAL "
+               "BALL — each seat's learned DNA + loyalty picks + ADP — so "
+               "'who's left at your pick' mirrors your real league, then ranks "
+               "the strategies by projected starting-lineup points.")
     if st.button("Run simulation"):
         try:
-            results = SIM.compare_strategies(pool, cfg, scoring_key)
+            # crystal-ball opponents: build the per-slot loyalty map (same as
+            # Prophecy) so bots draft their DNA tendencies + repeat 'guys'
+            import re as _re
+
+            def _lnn(s):
+                s = (s or "").lower().strip()
+                s = _re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
+                s = _re.sub(r"[^a-z0-9 ]", "", s)
+                return _re.sub(r"\s+", " ", s).strip()
+
+            _loy = {}
+            _mdna = ss.get("_mgr_dna") or {}
+            _s2o = ss.get("_slot_to_owner") or {}
+            for _sl, _own in _s2o.items():
+                _dd = _mdna.get(_own)
+                if _dd and _dd.get("favorite_players"):
+                    _loy[int(_sl)] = {_lnn(nm): c
+                                      for nm, c in _dd["favorite_players"].items()}
+            results = SIM.compare_strategies(pool, cfg, scoring_key,
+                                             opponents=opps, loyalty_by_slot=_loy)
             for res in results:
                 with st.container(border=True):
                     st.markdown(f"**#{res.get('rank','?')} {res.get('strategy','?').upper()}** — "

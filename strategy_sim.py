@@ -112,12 +112,40 @@ def _rb_count(roster_positions: list[str]) -> int:
     return sum(1 for p in roster_positions if p == "RB")
 
 
+def _need_caps(roster_positions: list[str], cfg: E.LeagueConfig) -> set:
+    """Positions still DRAFTABLE given what's already on the roster — enforces
+    a sane build (no 8-TE / 4-QB rosters). A position drops out once it hits its
+    cap: QB≤2, TE≤2, DST≤1, K≤1; RB/WR stay open (starters + FLEX + bench)."""
+    have = {}
+    for p in roster_positions:
+        have[p] = have.get(p, 0) + 1
+    caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1}   # RB/WR uncapped
+    ok = set()
+    for pos in ("QB", "RB", "WR", "TE", "DST", "K"):
+        if have.get(pos, 0) < caps.get(pos, 99):
+            ok.add(pos)
+    return ok
+
+
+def _unfilled_starters(roster_positions: list[str], cfg: E.LeagueConfig) -> set:
+    """Starter positions not yet filled — these get FORCED so the lineup is
+    legal (no empty WR1/WR2/DST). FLEX is satisfied by any RB/WR/TE surplus."""
+    have = {}
+    for p in roster_positions:
+        have[p] = have.get(p, 0) + 1
+    st = cfg.starters
+    need = set()
+    for pos in ("QB", "RB", "WR", "TE", "DST", "K"):
+        if have.get(pos, 0) < st.get(pos, 0):
+            need.add(pos)
+    return need
+
+
 def _allowed_positions(strategy: str, rnd: int, roster_positions: list[str],
                        cfg: E.LeagueConfig) -> Optional[set]:
-    """Positions the strategy permits for the user's pick this round.
-
-    Returns None to mean "no positional constraint" (pure best available).
-    K/DST are only ever allowed in the final two rounds regardless of strategy.
+    """Positions the strategy permits for the user's pick this round, INTERSECTED
+    with roster-need caps so the build stays legal (fills WR/DST, never hoards
+    8 TE / 4 QB). K/DST only in the final two rounds regardless of strategy.
     """
     late_window = rnd >= cfg.rounds - 1     # last two rounds may grab K/DST
     core = {"QB", "RB", "WR", "TE"}
@@ -144,7 +172,23 @@ def _allowed_positions(strategy: str, rnd: int, roster_positions: list[str],
 
     if late_window:
         allowed = allowed | set(_LATE_ONLY)
-    return allowed
+
+    # ---- roster-need gate (the real fix) --------------------------------
+    caps = _need_caps(roster_positions, cfg)
+    allowed = allowed & caps                       # drop capped positions
+
+    # if a STARTER slot is still empty and we're running out of rounds, force it
+    rounds_left = cfg.rounds - rnd + 1
+    unfilled = _unfilled_starters(roster_positions, cfg) & caps
+    # count non-K/DST starter needs; force them once rounds get tight
+    skill_unfilled = unfilled - set(_LATE_ONLY)
+    if skill_unfilled and rounds_left <= len(unfilled) + 1:
+        allowed = skill_unfilled or allowed
+    # always allow DST/K in the late window if still unfilled
+    if late_window:
+        allowed = allowed | (unfilled & set(_LATE_ONLY))
+
+    return allowed or caps or core
 
 
 def _pick_for_strategy(cands: list[_Candidate], strategy: str, rnd: int,
@@ -180,6 +224,52 @@ def _pick_adp_best(cands: list[_Candidate], cfg: E.LeagueConfig,
         pool = list(cands)
     pool.sort(key=lambda c: c._adp_key())
     return pool[0]
+
+
+def _pick_opponent(cands, cfg, overall, rnd, prof, loyal, opp_positions):
+    """CRYSTAL-BALL opponent pick: score the board through THIS manager's DNA
+    (tendency profile) + loyalty ('their guys') + ADP proximity, with roster
+    need — the same logic Prophecy uses. Falls back to ADP-best when no profile
+    is known, so 'who's left at your pick' reflects how your LEAGUE actually
+    drafts, not a flat ADP curve."""
+    import math
+    if not cands:
+        return None
+    late_window = rnd >= cfg.rounds - 1
+    # roster-need caps so opponents also build legal teams (no 8-TE bots)
+    have = {}
+    for p in opp_positions:
+        have[p] = have.get(p, 0) + 1
+    caps = {"QB": 2, "TE": 2, "DST": 1, "K": 1}
+    best, best_s = None, -1.0
+    for c in cands:
+        pos = c.position
+        if pos in _LATE_ONLY and not late_window:
+            continue
+        if have.get(pos, 0) >= caps.get(pos, 99):
+            continue
+        adp = c.adp
+        prox = (1.0 / (1.0 + math.exp(-(overall - adp) / 4.0))
+                if adp is not None else 0.15)
+        s = max(0.05, c.vorp + 60) * (0.5 + prox)
+        if prof:
+            s *= prof.pos_multiplier(pos, None, False)
+        lc = loyal.get(_ln_name(c.name), 0) if loyal else 0
+        if lc >= 2:
+            s *= 1.0 + 2.5 * lc          # their repeat-drafted 'guy'
+        if s > best_s:
+            best, best_s = c, s
+    if best is None:                     # everything capped → ADP-best fallback
+        return _pick_adp_best(cands, cfg, rnd)
+    return best
+
+
+def _ln_name(s: str) -> str:
+    import re
+    s = (s or "").lower().strip()
+    s = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +344,14 @@ def _build_lineup(picked: list[_Candidate],
 # ---------------------------------------------------------------------------
 
 def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
-                      scoring_key: str) -> dict:
+                      scoring_key: str, opponents=None,
+                      loyalty_by_slot=None) -> dict:
     """Simulate ONE strategy from the user's slot.
+
+    Opponents draft through the CRYSTAL BALL (each seat's learned DNA + loyalty
+    'guys' + ADP), so 'who's left at your pick' mirrors how your real league
+    drafts — not a flat ADP curve. Falls back to ADP-best for seats with no
+    learned profile.
 
     Returns a dict with: strategy, picks, lineup, total_points, summary.
     """
@@ -263,6 +359,7 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; "
                          f"expected one of {STRATEGIES}")
+    loyalty_by_slot = loyalty_by_slot or {}
 
     # score the format on a copy of the config so we never mutate the caller's
     sim_cfg = E.LeagueConfig(
@@ -280,6 +377,12 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
     my_picked: list[_Candidate] = []
     my_positions: list[str] = []
     pick_log: list[tuple] = []
+    opp_positions: dict[int, list[str]] = {}   # slot -> [positions] for bots
+
+    def _slot_of(ov):
+        r = (ov - 1) // sim_cfg.teams + 1
+        idx = (ov - 1) % sim_cfg.teams
+        return idx + 1 if r % 2 == 1 else sim_cfg.teams - idx
 
     for overall in range(1, last_overall + 1):
         remaining = list(avail.values())
@@ -294,7 +397,16 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
                 my_positions.append(chosen.position)
                 pick_log.append((overall, chosen.name, chosen.position))
         else:
-            chosen = _pick_adp_best(remaining, sim_cfg, rnd)
+            # CRYSTAL BALL: this opponent seat drafts via its DNA + loyalty
+            _sl = _slot_of(overall)
+            _prof = (opponents.profiles.get(_sl)
+                     if opponents and hasattr(opponents, "profiles") else None)
+            _loyal = loyalty_by_slot.get(_sl, {})
+            _opos = opp_positions.setdefault(_sl, [])
+            chosen = _pick_opponent(remaining, sim_cfg, overall, rnd,
+                                    _prof, _loyal, _opos)
+            if chosen is not None:
+                _opos.append(chosen.position)
         if chosen is not None:
             avail.pop(chosen.name, None)
 
@@ -311,9 +423,14 @@ def simulate_strategy(pool: list, cfg: E.LeagueConfig, strategy: str,
 
 
 def compare_strategies(pool: list, cfg: E.LeagueConfig,
-                       scoring_key: str) -> list[dict]:
-    """Run all four strategies and rank them by starting-lineup points desc."""
-    results = [simulate_strategy(pool, cfg, s, scoring_key) for s in STRATEGIES]
+                       scoring_key: str, opponents=None,
+                       loyalty_by_slot=None) -> list[dict]:
+    """Run all four strategies and rank them by starting-lineup points desc.
+    Opponents draft via the crystal ball (DNA + loyalty) when provided."""
+    results = [simulate_strategy(pool, cfg, s, scoring_key,
+                                 opponents=opponents,
+                                 loyalty_by_slot=loyalty_by_slot)
+               for s in STRATEGIES]
     results.sort(key=lambda r: (-r["total_points"], r["strategy"]))
     for rank, r in enumerate(results, start=1):
         r["rank"] = rank
