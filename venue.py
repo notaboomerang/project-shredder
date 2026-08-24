@@ -49,6 +49,56 @@ STADIUM_ROOF = {
 
 _INDOOR = {"dome", "retractable"}
 
+# team -> HOME field surface. Artificial turf is linked in public research to
+# higher non-contact lower-body (soft-tissue/ACL/Achilles) injury rates than
+# natural grass. Seeded map (overridable via data/surfaces.json). "turf" =
+# artificial; "grass" = natural. As of the 2025/26 stadium slate.
+STADIUM_SURFACE = {
+    # artificial turf
+    "ATL": "turf", "DET": "turf", "MIN": "turf", "NO": "turf", "IND": "turf",
+    "NYG": "turf", "NYJ": "turf", "NE": "turf", "CIN": "turf", "SEA": "turf",
+    "LV": "turf", "HOU": "turf", "DAL": "turf",
+    # natural grass
+    "ARI": "grass", "LAR": "grass", "LAC": "grass", "MIA": "grass",
+    "TB": "grass", "JAX": "grass", "CAR": "grass", "SF": "grass",
+    "TEN": "grass", "BUF": "grass", "PHI": "grass", "WAS": "grass",
+    "PIT": "grass", "CLE": "grass", "BAL": "grass", "CHI": "grass",
+    "GB": "grass", "DEN": "grass", "KC": "grass",
+}
+_SURFACE_OVERRIDE = os.path.join(_DATA_DIR, "surfaces.json")
+
+
+def load_surfaces() -> dict[str, str]:
+    if os.path.exists(_SURFACE_OVERRIDE):
+        with open(_SURFACE_OVERRIDE, encoding="utf-8") as f:
+            return json.load(f)
+    return dict(STADIUM_SURFACE)
+
+
+def turf_exposure(team: str) -> Optional[dict]:
+    """Count a team's HOME turf games this season — a soft-tissue injury-risk
+    CONTEXT signal (turf > grass for non-contact lower-body injuries). Only home
+    games are counted because the 2026 schedule doesn't encode home/away, so a
+    player reliably plays ~half his slate on his own surface. Returns
+    {home_turf_games, home_surface, flag} or None.
+
+    This is informational ONLY — it is never folded into projection/VORP."""
+    sched = M.load_schedule().get(team)
+    if not sched:
+        return None
+    surf = load_surfaces()
+    own = surf.get(team, "grass")
+    home_games = sum(1 for wk, opp in sched.items() if opp is not None)
+    # ~half the games are at home on the team's own surface
+    home_est = round(home_games / 2)
+    turf_home = home_est if own == "turf" else 0
+    flag = None
+    if own == "turf":
+        flag = (f"🌱 TURF home field (~{home_est} games) — elevated "
+                f"soft-tissue risk")
+    return {"home_turf_games": turf_home, "home_surface": own, "flag": flag}
+
+
 
 def load_roofs() -> dict[str, str]:
     if os.path.exists(_OVERRIDE):

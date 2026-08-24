@@ -254,6 +254,13 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
         _vdelta, _vbadge = VEN.venue_adjustment(raw.team, pv.position)
         if _vbadge:
             badges.append(_vbadge)
+        # RISK CONTEXT: turf home field (soft-tissue injury risk) — RB/WR/TE
+        # carry the lower-body load. Informational badge ONLY; never folded into
+        # the composite (turf is a durability caveat, not a value change).
+        if pv.position in ("RB", "WR", "TE"):
+            _turf = VEN.turf_exposure(raw.team)
+            if _turf and _turf.get("flag"):
+                badges.append(_turf["flag"])
         # PROFILE: advanced metrics (opportunity / role / environment / risk)
         _mdelta, _mbadges = ADV.metric_adjustments(pv.name, pv.position)
         badges.extend(_mbadges[:3])   # cap to keep the row readable
