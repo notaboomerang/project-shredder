@@ -259,15 +259,23 @@ def _pick_opponent(cands, cfg, overall, rnd, prof, loyal, opp_positions):
             continue
         if have.get(pos, 0) >= caps.get(pos, 99):
             continue
-        adp = c.adp
-        prox = (1.0 / (1.0 + math.exp(-(overall - adp) / 4.0))
-                if adp is not None else 0.15)
-        s = max(0.05, c.vorp + 60) * (0.5 + prox)
-        if prof:
+        # PRIORITY: ESPN rankings (ADP) as the BASE — this is the opponents'
+        # board, NOT our VORP. Then DNA (tendency) as the primary multiplier,
+        # then loyalty as the override that can jump 'their guy' up the board.
+        adp = c.adp if c.adp is not None else 400.0
+        # base: better (lower) ADP = higher want, decaying with rank
+        base = 1000.0 / (adp + 8.0)
+        # only realistic once the pick is near/after the player's ADP (a real
+        # room rarely reaches >1 round early except for a loyalty guy)
+        if adp is not None and overall < adp - 12:
+            base *= 0.35                 # too early — unlikely unless loyal
+        s = base
+        if prof:                          # DNA: primary lean multiplier
             s *= prof.pos_multiplier(pos, None, False)
         lc = loyal.get(_ln_name(c.name), 0) if loyal else 0
-        if lc >= 2:
-            s *= 1.0 + 2.5 * lc          # their repeat-drafted 'guy'
+        if lc >= 2:                       # loyalty override: their 'guy'
+            s *= 1.0 + 2.5 * lc
+        s += c.vorp * 0.001               # VORP: negligible tiebreaker only
         if s > best_s:
             best, best_s = c, s
     if best is None:                     # everything capped → ADP-best fallback

@@ -47,22 +47,22 @@ def _score_candidate(pv: E.PlayerValue, adp: Optional[float], overall: int,
                      prof, loyalty_mult: float = 1.0) -> float:
     """How much this manager wants this player at this pick.
 
-    `loyalty_mult` > 1 when this player is one of the manager's repeat-drafted
-    'guys' (from draft history) — a named-player pull on top of the positional
-    tendency, so Prophecy predicts the actual human, not just the position."""
-    import math
-    # ADP proximity: peaks when the pick number is near/after the player's ADP
-    if adp is not None:
-        prox = 1.0 / (1.0 + math.exp(-(overall - adp) / 4.0))
-    else:
-        prox = 0.15
-    base = max(0.05, pv.vorp + 60) * (0.5 + prox)
-    if prof:
-        base *= prof.pos_multiplier(pv.position, None, False)
+    PRIORITY (matches Strategy Sim): ESPN rankings (ADP) are the BASE board —
+    NOT our VORP — then DNA (tendency) is the primary multiplier, then loyalty
+    ('their guy', via loyalty_mult) is the override that jumps a repeat pick up.
+    VORP is only a negligible tiebreaker so our engine never steers opponents."""
+    a = adp if adp is not None else 400.0
+    base = 1000.0 / (a + 8.0)               # better (lower) ADP = higher want
+    if adp is not None and overall < adp - 12:
+        base *= 0.35                         # too early unless loyal
+    s = base
+    if prof:                                 # DNA: primary lean multiplier
+        s *= prof.pos_multiplier(pv.position, None, False)
     if pv.position in ("K", "DST"):
-        base *= 0.03 if overall < 130 else 1.5   # only late
-    base *= loyalty_mult
-    return base
+        s *= 0.03 if overall < 130 else 1.5  # streamed positions go late
+    s *= loyalty_mult                        # loyalty override
+    s += pv.vorp * 0.001                     # VORP: negligible tiebreaker only
+    return s
 
 
 def predict_board(pool, cfg: E.LeagueConfig, drafted: set,
