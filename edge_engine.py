@@ -277,6 +277,23 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
                                raw, my_qb_teams, my_pass_catcher_teams,
                                prefer_floor)
         composite += INJ.composite_penalty(pv.name)
+        # ROSTER-SURPLUS PENALTY: you already have enough of this position, so a
+        # 2nd/3rd here is only bench/flex value — demote it hard, especially for
+        # single-start slots (a 2nd TE/QB/DST/K should never top the board once
+        # the starter is filled). This is what stops "you have a TE, draft 3 TEs".
+        _have_pos = sum(1 for _n, _p in roster.players if _p == pv.position)
+        _start = cfg.starters.get(pv.position, 0)
+        _flex_room = pv.position in ("RB", "WR", "TE") and cfg.starters.get("FLEX", 0)
+        if _have_pos >= _start:
+            over = _have_pos - _start + 1          # how many past the starter need
+            if pv.position in ("QB", "K", "DST"):
+                composite -= 120.0 * over          # never stack single-start slots
+            elif pv.position == "TE":
+                # TE fills flex only marginally; 2nd TE eased, 3rd+ crushed
+                composite -= (30.0 if (_flex_room and _have_pos == _start)
+                              else 110.0 * over)
+            else:  # RB / WR — flex + bench depth is fine, mild taper
+                composite -= 8.0 * max(0, _have_pos - _start - 1)
         _inj = INJ.injury_for(pv.name)
         recs.append(Recommendation(
             name=pv.name, position=pv.position, team=pv.team,
