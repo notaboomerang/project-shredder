@@ -472,6 +472,27 @@ def _render_masthead():
         f'<div class="sub">// live-draft copilot · VORP + edge engine · '
         f'contextual insights · shred the board</div>'
         f'</div></div>', unsafe_allow_html=True)
+    # PHONE-ONLY: an obvious 'Setup / Connect' bar that opens the sidebar drawer
+    # (setup + ESPN connect live there). Clicks Streamlit's own sidebar toggle so
+    # it works reliably; hidden on desktop where the sidebar is already open.
+    st.markdown(
+        """
+<button class="only-mobile shredder-setup-btn" onclick="
+  var d=window.parent.document;
+  var t=d.querySelector('[data-testid=\\'stSidebarCollapsedControl\\'] button')
+     || d.querySelector('[data-testid=\\'stSidebarCollapsedControl\\']')
+     || d.querySelector('[data-testid=\\'baseButton-headerNoPadding\\']');
+  if(t){t.click();}
+">☰  Setup / Connect ESPN</button>
+<style>
+.shredder-setup-btn{display:none;}
+@media (max-width:820px){
+  .shredder-setup-btn{display:block;width:100%;margin:0 0 10px;padding:12px;
+    background:var(--accent);color:#06231a;border:none;border-radius:10px;
+    font:800 15px 'Inter',sans-serif;letter-spacing:.3px;}
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 _render_masthead()
