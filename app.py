@@ -1013,11 +1013,23 @@ def _render_bookmarklet_setup():
     and platform switch actually run JS."""
     import json as _json
     import streamlit.components.v1 as _components
+    _render_bookmarklet_body(st.sidebar)
+
+
+def _render_bookmarklet_setup_main():
+    """Same one-tap setup, rendered on the MAIN page (for the phone connect panel)."""
+    _render_bookmarklet_body(st)
+
+
+def _render_bookmarklet_body(container):
+    """Shared body for the one-tap login setup; `container` is st or st.sidebar."""
+    import json as _json
+    import streamlit.components.v1 as _components
     base = _app_base_url()
     bm = _bookmarklet_js(base)
     bm_js = _json.dumps(bm)          # safe-embed the bookmarklet as a JS string
     accent = "#31c48d"
-    with st.sidebar.expander("📲 One-tap login — set up once (~30s)", expanded=False):
+    with container.expander("📲 One-tap login — set up once (~30s)", expanded=False):
         st.caption("The easiest way to connect. Do this once; after that it's a "
                    "single tap every draft. Your cookies go straight from ESPN "
                    "into your own private session — never stored on the server.")
@@ -1533,6 +1545,93 @@ if st.sidebar.button("↩️ Undo last pick", use_container_width=True):
 
 
 # --------------------------------------------------------------------------- gate
+def _render_espn_connect_main(cfg):
+    """MAIN-PAGE ESPN connect panel — so a phone user can connect end-to-end
+    WITHOUT opening the sidebar (which is hard to reach on mobile). Renders the
+    same one-tap setup + cookie paste + league pick + Connect, wired to the same
+    session keys as the sidebar, so the two never disagree. Shown on the cloud in
+    ESPN mode before a league is connected."""
+    if EC is None:
+        st.error("ESPN client unavailable (install `requests`).")
+        return
+    have_ck = bool(ss.espn_s2 and ss.espn_swid)
+    st.markdown("### 🔌 Connect your ESPN league")
+    if not have_ck:
+        st.caption("Step 1: get your ESPN cookies (one-tap login is easiest), or "
+                   "paste them. They stay private to your session — never stored "
+                   "on the server.")
+        if IS_CLOUD:
+            _render_bookmarklet_setup_main()
+        with st.expander("…or paste cookies manually (espn_s2 + SWID)",
+                         expanded=False):
+            st.caption("On a computer logged into fantasy.espn.com: DevTools (F12) "
+                       "→ Application → Cookies → copy `espn_s2` and `SWID`.")
+            s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2,
+                               key="m_s2")
+            swid = st.text_input("SWID", type="password", value=ss.espn_swid,
+                                 key="m_swid")
+            if st.button("Use these cookies", key="m_useck"):
+                ss.espn_s2, ss.espn_swid = s2, swid
+                if not IS_CLOUD and SEC:
+                    SEC.save_file(s2, swid)
+                st.rerun()
+    else:
+        st.success("✓ Cookies loaded. Step 2: pick your league.")
+        _saved = _saved_leagues_load()
+        if st.button("🔎 Find my leagues", key="m_find",
+                     use_container_width=True):
+            with st.spinner("Asking ESPN for your leagues…"):
+                res = EC.discover_leagues(ss.espn_s2, ss.espn_swid)
+            if res.get("ok") and res.get("leagues"):
+                _saved_leagues_upsert(res["leagues"])
+                ss.espn_status = res["message"]
+                st.rerun()
+            else:
+                st.error(res.get("message", "Discovery failed."))
+        league_id, season = "", 2026
+        if _saved:
+            _opts = ["— pick a league —"] + [
+                (e.get("league_name") or e.get("label") or f"League {e['league_id']}")
+                + f" · {e.get('season', 2026)}" for e in _saved]
+            _sel = st.selectbox("Your leagues", _opts, key="m_pick")
+            if _sel != _opts[0]:
+                _e = _saved[_opts.index(_sel) - 1]
+                league_id = str(_e["league_id"])
+                season = int(_e.get("season", 2026))
+        if not str(league_id).strip().isdigit():
+            league_id = st.text_input("…or ESPN league ID", key="m_lid")
+            season = st.number_input("Season", 2020, 2030, 2026, key="m_season")
+        ss.dna_seasons = st.text_input(
+            "🧬 Learn opponent DNA from seasons", value=ss.get("dna_seasons", ""),
+            key="m_dna",
+            help="Past seasons of THIS league. Blank = skip.")
+        if st.button("⚡ Connect", type="primary", key="m_connect",
+                     use_container_width=True):
+            if not str(league_id).strip().isdigit():
+                ss.espn_status = "Enter a numeric league ID first."
+            else:
+                try:
+                    cli = EC.EspnClient(int(league_id), int(season),
+                                        ss.espn_s2, ss.espn_swid)
+                    ok, msg = cli.verify()
+                    ss.espn = cli if ok else None
+                    ss.espn_status = msg
+                    if ok:
+                        _sync_espn(cfg, force=True)
+                        with st.spinner("Learning opponent draft DNA…"):
+                            _learn_dna(league_id, season, ss.dna_seasons)
+                        st.rerun()
+                except Exception as ex:  # noqa: BLE001
+                    ss.espn = None
+                    ss.espn_status = f"Connect failed: {ex}"
+        if st.button("Forget cookies", key="m_forget"):
+            ss.espn_s2 = ss.espn_swid = ""
+            ss["_my_leagues"] = []
+            st.rerun()
+    if ss.espn_status:
+        (st.success if ss.espn else st.error)(ss.espn_status)
+
+
 _ready = (mode == "Manual") or (mode == "Mock" and ss.mock_on) \
     or (mode == "ESPN" and ss.espn is not None)
 if not _ready:
@@ -1540,8 +1639,9 @@ if not _ready:
         st.info("Hit **Start / restart mock** in the sidebar to practice against "
                 "AI bots that draft between your turns.")
     elif mode == "ESPN":
-        st.info("Connect your ESPN league in the sidebar to sync live picks. "
-                "No league handy? Switch to **Mock** or **Manual**.")
+        # Full connect flow right here on the main page — no sidebar needed on phone.
+        _render_espn_connect_main(cfg)
+        st.caption("No league handy? Switch to **Mock** or **Manual** at the top.")
     st.subheader("How it works")
     st.markdown(
         "- The **hero card** shows the single best pick for *your* roster right now.\n"
