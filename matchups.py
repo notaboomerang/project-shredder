@@ -163,10 +163,21 @@ class StackEval:
     )
 
 
-def evaluate_stack(qb: str, pass_catcher: str) -> Optional[StackEval]:
-    """Evaluate a QB + WR/TE stack (e.g. Stafford + Adams). Both must be on the
-    same team in KNOWN_TEAM (or a loaded team map)."""
-    tq, tc = KNOWN_TEAM.get(qb), KNOWN_TEAM.get(pass_catcher)
+def evaluate_stack(qb: str, pass_catcher: str,
+                   team_of: Optional[dict[str, str]] = None) -> Optional[StackEval]:
+    """Evaluate a QB + WR/TE stack (e.g. Burrow + Higgins). Both must be on the
+    same team.
+
+    Team is resolved from `team_of` (a name->abbr map, e.g. built from the live
+    player pool) first, then the seeded KNOWN_TEAM fallback. This lets ANY real
+    stack be scored, not just the four seeded Rams — the 32-team schedules are
+    already merged in via schedules_all.merge_into_matchups()."""
+    team_of = team_of or {}
+
+    def _resolve(name: str) -> Optional[str]:
+        return (team_of.get(name) or "").strip().upper() or KNOWN_TEAM.get(name)
+
+    tq, tc = _resolve(qb), _resolve(pass_catcher)
     if not tq or tq != tc:
         return None
     rpt = schedule_report(tq)

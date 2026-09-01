@@ -80,6 +80,35 @@ class SimResult:
     n: int
 
 
+def _my_best_pick(avail, my_positions, cfg, rnd):
+    """My pick inside a sim: best-available by VORP, but roster-aware so the
+    equity estimate reflects a LEGAL, sane build — not 3 TEs / 2 QBs stacked
+    just because they carry VORP. Mirrors the Board's discipline rails:
+      QB<=2, TE<=2, DST<=1, K<=1; and once the QB/TE STARTER slot is filled we
+      stop taking another (streamable positions never beat a scarce RB/WR in
+      the flex). K/DST only in the last two rounds.
+    """
+    if not avail:
+        return None
+    have = {}
+    for p in my_positions:
+        have[p] = have.get(p, 0) + 1
+    st = cfg.starters
+    hard = {"QB": 2, "TE": 2, "DST": 1, "K": 1}
+    late = rnd >= cfg.rounds - 1
+    for pv in avail:                       # avail is VORP-sorted desc
+        pos = pv.position
+        if pos in ("K", "DST") and not late:
+            continue
+        if have.get(pos, 0) >= hard.get(pos, 99):
+            continue
+        # don't take a 2nd QB/TE once the single starter slot is filled
+        if pos in ("QB", "TE") and have.get(pos, 0) >= st.get(pos, 1):
+            continue
+        return pv
+    return avail[0]                         # everything capped -> best remaining
+
+
 def simulate(pool, cfg: E.LeagueConfig, drafted: set, my_roster: list,
              current_overall: int, opponents=None, n: int = 300) -> SimResult:
     """Monte-Carlo the remaining draft n times."""
@@ -101,7 +130,8 @@ def simulate(pool, cfg: E.LeagueConfig, drafted: set, my_roster: list,
     for _ in range(n):
         avail = list(base_pvs)  # already VORP-sorted desc
         team_pts = {t: 0.0 for t in range(1, teams + 1)}
-        # seed my current roster points
+        # seed my current roster points AND positions (for roster-aware picks)
+        my_positions = [pos for _nm, pos in my_roster]
         for nm, _pos in my_roster:
             raw = meta.get(nm)
             if raw:
@@ -117,8 +147,10 @@ def simulate(pool, cfg: E.LeagueConfig, drafted: set, my_roster: list,
             if ov == next_overall:
                 seen_next = {pv.name for pv in avail}
             if slot == my_slot:
-                pick = avail[0]  # I take best available (VORP)
-                your_total += 0  # counted post-loop via team_pts
+                rnd = (ov - 1) // teams + 1
+                pick = _my_best_pick(avail, my_positions, cfg, rnd)
+                if pick is not None:
+                    my_positions.append(pick.position)
             else:
                 pick = _opp_pick(avail, slot, opponents, None)
             if pick is None:

@@ -1,0 +1,10 @@
+# Project Shredder — cloud deploy dependencies (Streamlit Community Cloud etc.)
+# The desktop app runs on the local Python 3.13 env; this file is what the
+# HEADLESS cloud host installs. Desktop-only bits (Playwright/Node ESPN-login
+# popup, browser_cookie3 auto-cookie-read, the DOM poller) are intentionally
+# omitted — they don't run on a server, and the app already degrades gracefully
+# to the "paste ESPN cookies" path when they're absent.
+
+streamlit>=1.40
+requests>=2.31
+reportlab>=4.0        # cheat-sheet PDF generation (make_cheatsheets.py)

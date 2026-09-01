@@ -102,6 +102,59 @@ def open_needs(roster: Roster, cfg: E.LeagueConfig) -> dict[str, float]:
     return need
 
 
+def roster_state(roster: Roster, cfg: E.LeagueConfig) -> dict:
+    """Single source of truth for 'what does my starting lineup still need'.
+
+    Returns a dict the UI and the composite can both read:
+      counts       {pos: n}                 how many of each I've drafted
+      starters     {pos: n}                 dedicated starter slots for each pos
+      filled       {pos: n}                 how many of my players fill a STARTER
+                                            slot at that pos (capped at starters)
+      flex_slots   int                      total FLEX slots (RB/WR/TE eligible)
+      flex_filled  int                      flex slots I've already covered w/ surplus
+      flex_open    int                      flex slots still open
+      needs        {pos: float}             open-need weight (from open_needs)
+      starter_open {pos: int}               dedicated starter slots still empty
+      done         set[str]                 positions where I have zero remaining
+                                            starter/flex value to add (pure bench)
+    """
+    have = roster.counts()
+    s = cfg.starters
+    flex_slots = sum(c for slot, c in s.items() if slot in E.FLEX_ELIGIBLE)
+
+    # dedicated starter fill per position (capped at the slot count)
+    filled = {p: min(have.get(p, 0), s.get(p, 0))
+              for p in ("QB", "RB", "WR", "TE", "K", "DST")}
+    starter_open = {p: max(0, s.get(p, 0) - have.get(p, 0))
+                    for p in ("QB", "RB", "WR", "TE", "K", "DST")}
+
+    # flex is filled by RB/WR/TE beyond their dedicated starter slots
+    flex_surplus = sum(max(0, have.get(p, 0) - s.get(p, 0))
+                       for p in ("RB", "WR", "TE"))
+    flex_filled = min(flex_slots, flex_surplus)
+    flex_open = max(0, flex_slots - flex_filled)
+
+    needs = open_needs(roster, cfg)
+
+    # a position is "done" (bench-only from here) when its dedicated starter
+    # slots are full AND there's no flex room it can still fill. Single-start
+    # slots (QB/K/DST) are done the moment they're filled.
+    done: set[str] = set()
+    for p in ("QB", "RB", "WR", "TE", "K", "DST"):
+        if starter_open.get(p, 0) > 0:
+            continue
+        if p in ("RB", "WR", "TE") and flex_open > 0:
+            continue
+        done.add(p)
+
+    return {
+        "counts": have, "starters": dict(s), "filled": filled,
+        "flex_slots": flex_slots, "flex_filled": flex_filled,
+        "flex_open": flex_open, "needs": needs,
+        "starter_open": starter_open, "done": done,
+    }
+
+
 # ---------------------------------------------------------------------------
 # the recommendation
 # ---------------------------------------------------------------------------
@@ -121,6 +174,12 @@ class Recommendation:
     badges: list[str] = field(default_factory=list)
     injury_chip: Optional[str] = None
     injury_note: Optional[str] = None
+    # itemized "why this pick" breakdown: list of dicts with keys
+    #   label   short name of the factor
+    #   value   the numeric contribution to the composite (signed), or None for
+    #           context-only rows (e.g. raw ADP, bye week)
+    #   detail  a plain-English explanation of what the factor means
+    explain: list[dict] = field(default_factory=list)
 
 
 def _age_badge(pos: str, age: Optional[float], rookie: bool) -> Optional[str]:
@@ -193,7 +252,8 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
                 last_in_tier.add(pv.name)
 
     # 3) roster need + my pick timing
-    needs = open_needs(roster, cfg)
+    rstate = roster_state(roster, cfg)
+    needs = rstate["needs"]
     my_picks = cfg.my_overall_picks()
     picks_until_next = 0
     my_next_overall = None
@@ -280,39 +340,59 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
         if raw.bye and raw.bye in roster_byes:
             badges.append(f"BYE clash (wk {raw.bye})")
 
+        explain: list[dict] = []
+        # context rows first (no score value; pure information)
+        explain.append({"label": "Projected points", "value": None,
+                        "detail": f"{round(pv.proj_points, 1)} pts for your scoring "
+                        f"format · position rank {pv.position}{pv.pos_rank}, tier "
+                        f"T{pv.tier}."})
+        if adp is not None:
+            explain.append({"label": "ADP", "value": None,
+                            "detail": f"Average draft position {adp} ({scoring_key} "
+                            f"consensus). You're on the clock at overall "
+                            f"{current_overall}."})
+        if surv is not None and picks_until_next > 0:
+            explain.append({"label": "Survival to next pick", "value": None,
+                            "detail": f"{int(surv*100)}% chance he's still available "
+                            f"at your next pick (#{my_next_overall}, "
+                            f"{picks_until_next} picks away)."})
+        if raw.bye:
+            explain.append({"label": "Bye week", "value": None,
+                            "detail": f"Week {raw.bye}"
+                            + (" — clashes with a current starter's bye."
+                               if raw.bye in roster_byes else ".")})
+
         composite = _composite(pv, vva, surv, needs, pv.name in last_in_tier,
                                raw, my_qb_teams, my_pass_catcher_teams,
-                               prefer_floor)
-        composite += INJ.composite_penalty(pv.name)
-        # ROSTER-SURPLUS PENALTY: you already have enough of this position, so a
-        # 2nd/3rd here is only bench/flex value — demote it hard, especially for
-        # single-start slots (a 2nd TE/QB/DST/K should never top the board once
-        # the starter is filled). This is what stops "you have a TE, draft 3 TEs".
-        _have_pos = sum(1 for _n, _p in roster.players if _p == pv.position)
-        _start = cfg.starters.get(pv.position, 0)
-        _flex_room = pv.position in ("RB", "WR", "TE") and cfg.starters.get("FLEX", 0)
-        if _have_pos >= _start:
-            over = _have_pos - _start + 1          # how many past the starter need
-            if pv.position in ("QB", "K", "DST"):
-                composite -= 120.0 * over          # never stack single-start slots
-            elif pv.position == "TE":
-                # TE fills flex only marginally; 2nd TE eased, 3rd+ crushed
-                composite -= (30.0 if (_flex_room and _have_pos == _start)
-                              else 110.0 * over)
-            else:  # RB / WR — starters + ~1 flex is plenty; ramp hard after that
-                # effective RB/WR capacity = starters + (flex counts once, for
-                # whichever of RB/WR you have fewer of). Past that it's bench:
-                # a 4th RB when WR2 is open should sink well below the WR.
-                cap = _start + (1 if _flex_room else 0)     # e.g. RB: 2 + 1 = 3
-                if _have_pos >= cap:
-                    depth_over = _have_pos - cap + 1        # 4th RB -> 1, 5th -> 2
-                    composite -= 45.0 * depth_over
-                    # extra sting if a DIFFERENT skill starter is still unfilled
-                    _other_open = any(needs.get(p, 0) > 0
-                                      for p in ("RB", "WR", "TE")
-                                      if p != pv.position)
-                    if _other_open:
-                        composite -= 35.0
+                               prefer_floor, explain=explain)
+        _injpen = INJ.composite_penalty(pv.name)
+        composite += _injpen
+        if _injpen:
+            _inj0 = INJ.injury_for(pv.name)
+            explain.append({"label": "Injury penalty", "value": round(_injpen, 1),
+                            "detail": (_inj0.narrative if _inj0 and _inj0.narrative
+                                       else "Current injury designation reduces "
+                                       "confidence in the projection.")})
+        # ROSTER-SURPLUS PENALTY — the fix for "you have a TE, it keeps saying
+        # draft another TE." Once a position can no longer improve your STARTING
+        # lineup (dedicated starter slots full + no flex room it can fill), any
+        # further player there is pure bench depth and must rank BELOW every
+        # player who still fills a starting slot. The old code used flat additive
+        # penalties (e.g. -30 for a 2nd TE) that an elite VORP could out-run, so
+        # a great backup TE still floated to the top. We instead COLLAPSE the
+        # surplus player's score toward bench value: strip its VORP-driven score
+        # and replace it with a small depth-only signal, guaranteeing it can
+        # never leapfrog a real need. Depth at RB/WR (where flex/bye depth truly
+        # matters) keeps a little more value than a stockpiled QB/TE/K/DST.
+        _pre_surplus = composite
+        composite = _apply_surplus(composite, pv, roster, cfg, rstate)
+        if composite != _pre_surplus:
+            explain.append({"label": "Roster surplus", "value":
+                            round(composite - _pre_surplus, 1),
+                            "detail": f"You've already filled your starting "
+                            f"{pv.position} slot(s), so another {pv.position} is "
+                            f"only bench/flex depth — its score is capped below "
+                            f"any player who still fills a starting need."})
         _inj = INJ.injury_for(pv.name)
         recs.append(Recommendation(
             name=pv.name, position=pv.position, team=pv.team,
@@ -321,6 +401,7 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
             survival=surv, composite=round(composite, 1), badges=badges,
             injury_chip=(_inj.chip if _inj else None),
             injury_note=(_inj.narrative if _inj else None),
+            explain=explain,
         ))
 
     recs.sort(key=lambda r: r.composite, reverse=True)
@@ -335,54 +416,169 @@ def _overall_rank(pvs: list[E.PlayerValue], target: E.PlayerValue) -> int:
     return len(ordered)
 
 
+def _apply_surplus(composite: float, pv, roster: Roster, cfg: E.LeagueConfig,
+                   rstate: dict) -> float:
+    """Demote players at positions that can no longer help your STARTING lineup.
+
+    A position is 'saturated' when its dedicated starter slots are full and, for
+    flex-eligible positions, no flex slot remains for it. A saturated player is
+    worth only bench/depth value, so we DON'T just subtract a flat number (an
+    elite VORP would survive it) — we REBASE the score to a small depth value
+    that always sits below any player still filling a real need.
+    """
+    pos = pv.position
+    have = rstate["counts"].get(pos, 0)
+    start = rstate["starters"].get(pos, 0)
+    flex_open = rstate["flex_open"]
+    flex_eligible = pos in ("RB", "WR", "TE")
+
+    # can this position still fill a STARTER or FLEX slot? if so, no surplus.
+    starter_open = max(0, start - have)
+    if starter_open > 0:
+        return composite
+    if flex_eligible and flex_open > 0:
+        # still has a flex home — treat as needed but slightly discounted so a
+        # genuine dedicated-starter need edges it out.
+        return composite - 6.0
+
+    # SATURATED: pure bench depth from here. Rebase to a depth-only score.
+    # how many bodies past the last useful (starter+flex) slot are we?
+    useful_cap = start + (1 if flex_eligible else 0)
+    depth_index = max(1, have - useful_cap + 1)   # 1 for the first true backup
+
+    # base bench value: keep a whisper of the player's quality so the best
+    # backup at a position still sorts above a scrub, but cap it low.
+    quality = min(6.0, max(0.0, pv.vorp) * 0.15)
+    if pos in ("RB", "WR"):
+        bench_value = 4.0 + quality        # depth here matters (bye/injury/flex churn)
+    elif pos == "TE":
+        bench_value = -6.0 + quality * 0.5  # a 2nd TE is rarely worth a pick early
+    else:  # QB / K / DST — never stockpile; a 2nd is nearly worthless mid-draft
+        bench_value = -40.0
+
+    # each extra body beyond the first backup drops further
+    bench_value -= 8.0 * (depth_index - 1)
+    # never let a surplus player score higher than the useful ceiling of a needed
+    # one; clamp to a low band regardless of raw VORP.
+    return min(composite, bench_value)
+
+
+_SCARCITY = {"RB": 1.0, "WR": 1.0, "TE": 0.9, "QB": 0.55, "K": 0.2, "DST": 0.25}
+
+
 def _composite(pv, vva, surv, needs, is_cliff, raw,
-               my_qb_teams, my_pc_teams, prefer_floor=False) -> float:
-    """Blend the edges into one number. VORP is the backbone; the rest nudge."""
-    score = pv.vorp
-    # positional-scarcity prior: QB/K/DST are streamable, so discount their
-    # pool-relative VORP early (an empty board otherwise floats QBs to the top).
-    # Survival badges already say "CAN WAIT"; this makes the SORT agree.
-    _SCARCITY = {"RB": 1.0, "WR": 1.0, "TE": 0.9, "QB": 0.55, "K": 0.2, "DST": 0.25}
-    score *= _SCARCITY.get(pv.position, 1.0)
-    # need weighting: multiply value by how much we need the position
-    need_w = 1.0 + 0.15 * min(needs.get(pv.position, 0), 2)
-    score *= need_w
-    # market: reward being a value vs ADP
+               my_qb_teams, my_pc_teams, prefer_floor=False,
+               explain: Optional[list] = None) -> float:
+    """Blend the edges into one number. VORP is the backbone; the rest nudge.
+
+    If `explain` (a list) is passed, each factor appends an itemized row
+    {label, value, detail} so the UI can show EXACTLY what drove the score.
+    """
+    def _add(label, value, detail):
+        if explain is not None:
+            explain.append({"label": label, "value": value, "detail": detail})
+
+    # --- backbone: VORP, scaled by positional scarcity ---
+    scarcity = _SCARCITY.get(pv.position, 1.0)
+    score = pv.vorp * scarcity
+    if scarcity != 1.0:
+        _add("VORP × scarcity", round(score, 1),
+             f"Value over replacement ({pv.vorp}) × {scarcity:g} scarcity prior "
+             f"— {pv.position} is streamable, so its raw VORP is discounted early.")
+    else:
+        _add("VORP", round(score, 1),
+             f"Value over replacement: projected points above a replacement-level "
+             f"{pv.position} in your league. The backbone of the score.")
+
+    # --- roster need multiplier ---
+    need_val = needs.get(pv.position, 0)
+    need_w = 1.0 + 0.15 * min(need_val, 2)
+    if need_w != 1.0:
+        before = score
+        score *= need_w
+        _add("Roster need", round(score - before, 1),
+             f"You still need {pv.position} for a starting slot — value boosted "
+             f"×{need_w:.2f}.")
+
+    # --- market: value vs ADP ---
     if vva is not None:
-        # vva is now in POSITIONAL draft-slots (model pos-rank vs ADP pos-rank).
-        score += 3.0 * max(-8, min(8, vva))
-    # urgency: if he won't survive, nudge up so we grab now
+        delta = 3.0 * max(-8, min(8, vva))
+        score += delta
+        if abs(vva) >= 1:
+            kind = "steal (model ranks him ahead of the market)" if vva > 0 \
+                else "reach (market ranks him ahead of the model)"
+            _add("Value vs ADP", round(delta, 1),
+                 f"Model has him {abs(int(vva))} spot(s) "
+                 f"{'ahead of' if vva > 0 else 'behind'} his ADP at {pv.position} "
+                 f"— {kind}.")
+
+    # --- urgency: won't survive to your next pick ---
     if surv is not None and surv <= 0.3:
         score += 8
-    # tier cliff: don't let the last elite piece walk
+        _add("Won't last", 8.0,
+             f"Only {int(surv*100)}% chance he's still here at your next pick — "
+             f"grab-now urgency.")
+
+    # --- tier cliff: last elite piece at the position ---
     if is_cliff and pv.tier <= 3:
         score += 6
-    # stack synergy bonus
+        _add("Tier cliff", 6.0,
+             f"He's the last player in tier T{pv.tier} at {pv.position} — a real "
+             f"drop-off follows, so there's urgency to take him now.")
+
+    # --- stack synergy with your roster ---
     if (pv.position in ("WR", "TE") and raw.team in my_qb_teams) or \
        (pv.position == "QB" and raw.team in my_pc_teams):
         score += 5
-    # schedule softness (pass game)
+        _add("Stack synergy", 5.0,
+             f"Pairs with a player you already roster on {raw.team} — correlated "
+             f"scoring upside.")
+
+    # --- schedule softness + venue (pass game) ---
     if pv.position in ("QB", "WR", "TE"):
         rpt = M.schedule_report(raw.team)
         if rpt:
-            score += 0.4 * rpt.season_softness + 0.6 * rpt.playoff_softness
-        # venue / dome environment nudge
-        vdelta, _ = VEN.venue_adjustment(raw.team, pv.position)
-        score += vdelta
-    # advanced metrics nudge (opportunity/role/environment/risk)
-    mdelta, _ = ADV.metric_adjustments(pv.name, pv.position)
-    score += mdelta
-    # consistency: when the user wants "highest-scoring CONSISTENTLY", reward a
-    # steady weekly floor and mildly fade boom/bust.
+            sdelta = 0.4 * rpt.season_softness + 0.6 * rpt.playoff_softness
+            if abs(sdelta) >= 0.05:
+                score += sdelta
+                _add("Schedule (pass D)", round(sdelta, 1),
+                     f"Strength of pass-defense schedule (grade {rpt.grade}), "
+                     f"weighted toward the fantasy playoff weeks.")
+        vdelta, vbadge = VEN.venue_adjustment(raw.team, pv.position)
+        if vdelta:
+            score += vdelta
+            _add("Venue / environment", round(vdelta, 1),
+                 vbadge or f"Home-venue adjustment for {raw.team}.")
+
+    # --- advanced metrics (opportunity / role / environment / risk) ---
+    mdelta, mbadges = ADV.metric_adjustments(pv.name, pv.position)
+    if mdelta:
+        score += mdelta
+        _add("Advanced metrics", round(mdelta, 1),
+             ("; ".join(mbadges[:3]) if mbadges
+              else "Opportunity/role/environment signals."))
+
+    # --- consistency (only when prioritizing weekly floor) ---
     if prefer_floor:
-        cscore, _ = ADV.consistency_score(pv.name, pv.position)
-        score += (cscore - 50) * 0.25
-    # age
+        cscore, cbadge = ADV.consistency_score(pv.name, pv.position)
+        cdelta = (cscore - 50) * 0.25
+        if abs(cdelta) >= 0.1:
+            score += cdelta
+            _add("Consistency", round(cdelta, 1),
+                 cbadge or f"Weekly-floor consistency score {cscore}/100 "
+                 f"(you asked to prioritize floor).")
+
+    # --- age / rookie profile ---
     if pv.position == "RB" and raw.age and raw.age >= 28:
         score -= 4
+        _add("Age risk", -4.0,
+             f"RB aged {int(raw.age)} — past the typical production cliff.")
     if raw.rookie:
         score += 2
-        # combine / athletic profile nudges rookie ceiling (RB/WR/TE only)
-        adelta, _ = CMB.athletic_adjustment(pv.name, pv.position, raw.rookie)
-        score += adelta
+        _add("Rookie upside", 2.0, "Rookie — undervalued ceiling this early.")
+        adelta, abadge = CMB.athletic_adjustment(pv.name, pv.position, raw.rookie)
+        if adelta:
+            score += adelta
+            _add("Athletic profile", round(adelta, 1),
+                 abadge or "Combine/athletic testing adjustment.")
     return score

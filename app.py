@@ -1,643 +1,417 @@
 """
-Fantasy Draft Assistant — Level 100 live draft board.
+Fantasy Draft Assistant — a focused, single-screen live-draft copilot.
 
-Run:  streamlit run app.py   (use the Python 3.13 env with streamlit+requests)
+Run:  streamlit run app.py
 
-Three surfaces:
-  1. Sidebar  — DYNAMIC league config (scoring / teams / slot / lineup / bench),
-                connection mode (ESPN live-connect or Manual), your roster.
-  2. Board    — best-available ranked by the Edge Engine composite, with edge
-                badges, tiers, survival %, value-vs-ADP; your pick-timing banner.
-  3. Stack Lab— evaluate any QB + WR/TE stack's schedule softness (art+science).
+The whole app is built around ONE loop:
+    1. See the single best pick for YOUR roster right now (the hero card).
+    2. Draft it  -> it joins your team, the board requeues instantly.
+    3. Someone else takes a player -> mark them gone (one search box, one click),
+       and the next-best pick for your roster pops up automatically.
+
+Three ways to run a draft, all sharing that loop:
+    • Mock      — practice against AI bots that pick between your turns.
+    • Manual    — you drive every pick by hand (works for any platform).
+    • ESPN      — connect a league and sync live picks from ESPN's API.
+
+The heavy lifting (VORP, tiers, survival odds, opponent-aware need) lives in the
+engine modules; this file is just a clean surface over edge_engine.recommend().
+The sprawling previous UI is preserved as app_legacy.py.
 """
 from __future__ import annotations
+
+import copy
+import re
 
 import streamlit as st
 
 import engine as E
 import projections as P
 import edge_engine as X
-import matchups as M
 import opponents as O
-import archetype as A
-import strategy_sim as SIM
-import lineup_optimizer as LO
-import schedules_all as SCH
-import dark_horse as DH
-import soul as SOUL
-import waiver as WV
+import mock_draft as MOCK
 import shredder_rankings as SR
-import shadow_ledger as SLG
-import live_games as LG
-import situational as SIT
-import situational_lookup as SITL
-import roster_lab as RLAB
-import season_tools as SEA
-import draft_queue as DQ
-import simulate as SIMU
+import lineup_optimizer as LO
+import draft_insights as DI
 import copilot as CO
 import prophecy as PROPH
-import league_history as LH
-import wheel_play as WP
-import mock_draft as MOCK
-
-# fold all-32-team schedules into matchups so venue/pass-D work league-wide
 try:
-    SCH.merge_into_matchups()
-except Exception:
-    pass
+    import league_history as LH
+except Exception:  # noqa: BLE001
+    LH = None
 
+# Optional integrations — the app runs fully without any of them.
 try:
     import espn_client as EC
-except Exception:
+except Exception:  # noqa: BLE001
     EC = None
+try:
+    import secrets_store as SEC
+except Exception:  # noqa: BLE001
+    SEC = None
+try:
+    import espn_login as ELOGIN
+except Exception:  # noqa: BLE001
+    ELOGIN = None
+try:
+    import saved_leagues as SL
+except Exception:  # noqa: BLE001
+    SL = None
+try:
+    import live_feed as _LF
+    _norm = _LF._norm
+except Exception:  # noqa: BLE001
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
-import saved_leagues as SL
-import secrets_store as SEC
-import espn_login as ELOGIN
 
+# --------------------------------------------------------------------------- page
 import os as _os
-_ICON = _os.path.join(_os.path.dirname(__file__), "assets", "shredder_icon.png")
+import base64 as _b64
+
+_ASSETS = _os.path.join(_os.path.dirname(__file__), "assets")
+_ICON = _os.path.join(_ASSETS, "shredder_icon.png")
+
+
+def _icon_data_uri(fname):
+    """Base64 data URI for an asset image (for inline <img> in the masthead)."""
+    path = _os.path.join(_ASSETS, fname)
+    if _os.path.exists(path):
+        with open(path, "rb") as f:
+            return "data:image/png;base64," + _b64.b64encode(f.read()).decode()
+    return ""
+
+
 st.set_page_config(page_title="Project Shredder", layout="wide",
                    page_icon=(_ICON if _os.path.exists(_ICON) else "🎸"),
                    initial_sidebar_state="expanded")
 
-# --------------------------------------------------------------------------- slick theme
+
+def _inject_pwa():
+    """Make the app installable on a phone ('Add to Home Screen' -> app icon,
+    full-screen standalone). Builds a web-app manifest from a base64 icon and
+    injects it (plus apple-touch-icon + theme-color) into the PARENT page head
+    via a tiny component iframe — the reliable way to reach Streamlit's <head>."""
+    import json
+    icon = _icon_data_uri("shredder_icon.png") or _icon_data_uri("shredder_icon_128.png")
+    if not icon:
+        return
+    manifest = {
+        "name": "Project Shredder", "short_name": "Shredder",
+        "description": "Live-draft copilot — VORP + edge engine + opponent DNA.",
+        "display": "standalone", "orientation": "portrait",
+        "background_color": "#0b0d12", "theme_color": "#0b0d12",
+        "icons": [
+            {"src": icon, "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": icon, "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    }
+    manifest_js = json.dumps(json.dumps(manifest))   # embed as a JS string literal
+    icon_js = json.dumps(icon)
+    _html = f"""
+<script>
+(function(){{
+  try{{
+    var doc = window.parent.document;
+    // web-app manifest (as a blob URL so no served file is needed)
+    var blob = new Blob([{manifest_js}], {{type:'application/manifest+json'}});
+    var url = URL.createObjectURL(blob);
+    function setLink(rel, href, extra){{
+      var l = doc.querySelector('link[rel="'+rel+'"]') || doc.createElement('link');
+      l.setAttribute('rel', rel); l.setAttribute('href', href);
+      if(extra){{ for(var k in extra) l.setAttribute(k, extra[k]); }}
+      doc.head.appendChild(l);
+    }}
+    setLink('manifest', url);
+    setLink('apple-touch-icon', {icon_js});
+    function setMeta(name, content){{
+      var m = doc.querySelector('meta[name="'+name+'"]') || doc.createElement('meta');
+      m.setAttribute('name', name); m.setAttribute('content', content);
+      doc.head.appendChild(m);
+    }}
+    setMeta('theme-color', '#0b0d12');
+    setMeta('apple-mobile-web-app-capable', 'yes');
+    setMeta('apple-mobile-web-app-status-bar-style', 'black-translucent');
+    setMeta('apple-mobile-web-app-title', 'Shredder');
+    setMeta('mobile-web-app-capable', 'yes');
+    setMeta('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
+  }}catch(e){{ /* PWA polish is best-effort; never block the app */ }}
+}})();
+</script>
+"""
+    # A component iframe is required to EXECUTE the injection script (st.html
+    # sanitizes <script>). Prefer the current API; fall back across versions.
+    try:
+        import streamlit.components.v1 as _components
+        _components.html(_html, height=0, width=0)
+    except Exception:  # noqa: BLE001
+        try:
+            st.components.v1.html(_html, height=0, width=0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_inject_pwa()
+
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700;800&family=Space+Grotesk:wght@500;700&display=swap');
 :root{
-  /* punk-rock analytics: near-black neutral base, acid accents, hairlines */
-  --bg:#0a0a0c; --panel:#111114; --panel2:#17171b; --line:#2a2a30;
-  --txt:#ececef; --dim:#8a8a95; --accent:#e8ff53; --accent2:#ff2e88;
-  --good:#3ddc84; --warn:#ffb020; --bad:#ff4d5e; --gold:#e8ff53;
+  --bg:#0b0d12; --panel:#141822; --panel2:#1b2130; --line:#2a3242;
+  --txt:#eef2f8; --dim:#8b95a7; --accent:#33d69f; --accent2:#5b9dff;
+  --warn:#ffb454; --bad:#ff5c5c; --good:#33d69f;
 }
-html,body,[class*="css"]{font-family:'Inter',system-ui,sans-serif;}
-.stApp{background:
-  linear-gradient(rgba(232,255,83,.015) 1px, transparent 1px) 0 0/100% 3px,
-  radial-gradient(900px 500px at 85% -12%, #14140f 0%, var(--bg) 60%);}
-/* header — zine masthead */
-.hero{background:linear-gradient(100deg,#0f0f10 0%,#141410 55%,#170d13 100%);
-  border:1px solid var(--line);border-left:3px solid var(--accent);
-  border-radius:6px;padding:16px 22px;margin-bottom:14px;
-  box-shadow:0 6px 34px rgba(0,0,0,.6);}
-.hero h1{font-family:'Space Grotesk','Inter',sans-serif;font-size:26px;font-weight:700;
-  margin:0;letter-spacing:-.5px;text-transform:uppercase;
-  background:linear-gradient(90deg,#e8ff53,#ff2e88);-webkit-background-clip:text;
-  -webkit-text-fill-color:transparent;}
-.hero .sub{color:var(--dim);font-size:12px;margin-top:3px;
-  font-family:'JetBrains Mono',monospace;letter-spacing:.3px;}
-/* metric tiles */
-[data-testid="stMetric"]{background:var(--panel);border:1px solid var(--line);
-  border-radius:6px;padding:12px 14px;box-shadow:none;}
-[data-testid="stMetricValue"]{font-family:'JetBrains Mono',monospace;font-size:22px;
-  font-weight:800;color:var(--txt);}
-[data-testid="stMetricLabel"]{color:var(--dim);font-weight:600;
-  text-transform:uppercase;font-size:11px;letter-spacing:.5px;}
-/* player card container */
+.stApp{background:radial-gradient(1100px 600px at 80% -10%, #17202e 0%, var(--bg) 60%);}
+[data-testid="stMetricValue"]{font-size:22px;font-weight:800;color:var(--txt);}
+[data-testid="stMetricLabel"]{color:var(--dim);text-transform:uppercase;
+  font-size:11px;letter-spacing:.5px;}
 [data-testid="stVerticalBlockBorderWrapper"]{background:var(--panel);
-  border:1px solid var(--line)!important;border-radius:6px;
-  transition:border-color .12s, transform .08s;}
-[data-testid="stVerticalBlockBorderWrapper"]:hover{border-color:var(--accent)!important;
-  transform:translateY(-1px);box-shadow:-2px 0 0 var(--accent2);}
-/* tabs — index-card row */
-.stTabs [data-baseweb="tab-list"]{gap:4px;background:transparent;}
-.stTabs [data-baseweb="tab"]{background:var(--panel);border:1px solid var(--line);
-  border-radius:4px 4px 0 0;padding:8px 15px;font-weight:600;color:var(--dim);
-  text-transform:uppercase;font-size:12px;letter-spacing:.4px;}
-.stTabs [aria-selected="true"]{background:var(--panel2);color:var(--accent)!important;
-  border-bottom:2px solid var(--accent);}
-/* buttons */
-.stButton>button{border-radius:5px;border:1px solid var(--line);font-weight:700;
-  background:var(--panel2);color:var(--txt);transition:all .1s;
-  text-transform:uppercase;font-size:12px;letter-spacing:.3px;}
-.stButton>button:hover{border-color:var(--accent);color:var(--accent);
-  box-shadow:inset 0 0 0 1px var(--accent);}
-/* badges (rendered via markdown spans) */
-.bdg{display:inline-block;font:700 10px/1.5 'JetBrains Mono';padding:2px 8px;
-  margin:2px 3px 2px 0;border-radius:3px;border:1px solid var(--line);white-space:nowrap;
-  text-transform:uppercase;letter-spacing:.3px;}
-.bdg-val{background:rgba(61,220,132,.12);color:var(--good);border-color:rgba(61,220,132,.45);}
-.bdg-urgent{background:rgba(255,77,94,.12);color:var(--bad);border-color:rgba(255,77,94,.45);}
-.bdg-wait{background:rgba(138,138,149,.10);color:var(--dim);}
-.bdg-cliff{background:rgba(232,255,83,.12);color:var(--accent);border-color:rgba(232,255,83,.45);}
-.bdg-stack{background:rgba(255,46,136,.14);color:var(--accent2);border-color:rgba(255,46,136,.45);}
-.bdg-soft{background:rgba(232,255,83,.10);color:var(--accent);border-color:rgba(232,255,83,.35);}
-.bdg-neutral{background:var(--panel2);color:var(--dim);}
-.pill{font:800 12px 'JetBrains Mono';padding:3px 9px;border-radius:4px;}
-.pos-RB{background:rgba(61,220,132,.15);color:var(--good);}
-.pos-WR{background:rgba(232,255,83,.15);color:var(--accent);}
-.pos-TE{background:rgba(255,46,136,.15);color:var(--accent2);}
-.pos-QB{background:rgba(255,176,32,.15);color:var(--warn);}
+  border:1px solid var(--line)!important;border-radius:10px;}
+.stButton>button{border-radius:8px;font-weight:700;border:1px solid var(--line);
+  background:var(--panel2);color:var(--txt);}
+.stButton>button:hover{border-color:var(--accent);color:var(--accent);}
+.stButton>button[kind="primary"]{background:var(--accent);color:#06231a;
+  border:1px solid var(--accent);}
+.pill{font:800 12px 'JetBrains Mono',monospace;padding:2px 8px;border-radius:6px;
+  background:var(--panel2);color:var(--txt);border:1px solid var(--line);}
+.pos-RB{background:#1f3a2e;color:#7ff0c0;border-color:#2f6e52;}
+.pos-WR{background:#1f2f4a;color:#8fbcff;border-color:#2f5aa0;}
+.pos-QB{background:#3a2f1f;color:#ffcf8f;border-color:#7a5f2f;}
+.pos-TE{background:#331f3a;color:#e0a0ff;border-color:#6a2f7a;}
 .pos-K,.pos-DST{background:var(--panel2);color:var(--dim);}
-.inj{font:800 10px 'JetBrains Mono';padding:2px 7px;border-radius:3px;margin-left:6px;}
-.inj-out{background:rgba(255,77,94,.2);color:var(--bad);border:1px solid var(--bad);}
-.inj-doubt{background:rgba(255,176,32,.18);color:var(--warn);border:1px solid var(--warn);}
-.inj-quest{background:rgba(232,255,83,.15);color:var(--accent);border:1px solid var(--accent);}
-.pname{font-family:'Space Grotesk','Inter',sans-serif;font-weight:700;font-size:16px;color:var(--txt);}
+.pname{font-weight:800;font-size:16px;color:var(--txt);}
 .pmeta{color:var(--dim);font-size:12px;font-family:'JetBrains Mono',monospace;}
-/* multiselect chips — lime fill needs BLACK text or it's unreadable */
-[data-baseweb="tag"]{background:var(--accent)!important;border-radius:4px!important;}
-[data-baseweb="tag"] span,[data-baseweb="tag"] div{color:#0a0a0c!important;
-  font-family:'JetBrains Mono',monospace!important;font-weight:700!important;}
-[data-baseweb="tag"] svg{fill:#0a0a0c!important;color:#0a0a0c!important;}
-[data-baseweb="tag"] [role="button"]:hover{background:rgba(0,0,0,.18)!important;}
-/* sidebar input boxes — hairline white border so they're visible on black */
-section[data-testid="stSidebar"] [data-baseweb="input"],
-section[data-testid="stSidebar"] [data-baseweb="select"]>div,
-section[data-testid="stSidebar"] [data-baseweb="base-input"],
-section[data-testid="stSidebar"] .stNumberInput div[data-baseweb="input"]{
-  border:1px solid rgba(255,255,255,.35)!important;border-radius:5px!important;
-  background:var(--panel)!important;}
-section[data-testid="stSidebar"] [data-baseweb="input"]:focus-within,
-section[data-testid="stSidebar"] [data-baseweb="select"]>div:focus-within{
-  border-color:var(--accent)!important;}
-/* number-input +/- steppers: hairline border too */
-section[data-testid="stSidebar"] .stNumberInput button{
-  border:1px solid rgba(255,255,255,.30)!important;}
+.bdg{display:inline-block;font:700 10px/1.5 'JetBrains Mono',monospace;
+  padding:2px 7px;margin:2px 3px 2px 0;border-radius:6px;border:1px solid var(--line);
+  color:var(--dim);background:var(--panel2);text-transform:uppercase;letter-spacing:.3px;}
+.bdg-val{background:#12301f;color:#6fe0a0;border-color:#2f6e52;}
+.bdg-urgent{background:#3a1414;color:#ff9c9c;border-color:#7a2f2f;}
+.bdg-need{background:#12233a;color:#8fbcff;border-color:#2f5aa0;}
+.bdg-cliff{background:#33260f;color:#ffcf8f;border-color:#7a5f2f;}
+.hero{background:linear-gradient(100deg,#10261f,#122033);border:1px solid var(--accent);
+  border-radius:14px;padding:18px 22px;margin-bottom:14px;
+  box-shadow:0 0 30px rgba(51,214,159,.18);}
+.hero .tag{font:800 12px 'JetBrains Mono',monospace;color:var(--accent);
+  letter-spacing:1.5px;}
+.hero .nm{font-size:30px;font-weight:800;color:var(--txt);margin:2px 0;}
+.masthead{display:flex;align-items:center;gap:14px;
+  background:linear-gradient(100deg,#0d1119 0%,#141a26 100%);
+  border:1px solid var(--line);border-left:4px solid var(--accent);
+  border-radius:12px;padding:14px 20px;margin-bottom:14px;
+  box-shadow:0 6px 30px rgba(0,0,0,.5);}
+.masthead img{width:48px;height:48px;border-radius:10px;border:1px solid var(--line);}
+.masthead h1{font-size:26px;font-weight:800;margin:0;letter-spacing:1px;
+  text-transform:uppercase;color:var(--txt);}
+.masthead .sub{color:var(--dim);font-size:12px;margin-top:2px;
+  font-family:'JetBrains Mono',monospace;letter-spacing:.3px;}
+.rowline{padding:6px 0;border-bottom:1px solid var(--line);}
+.slotchip{display:inline-block;font:700 11px 'JetBrains Mono',monospace;
+  padding:3px 8px;margin:2px;border-radius:6px;border:1px solid var(--line);}
+.slot-filled{background:#12301f;color:#7ff0c0;border-color:#2f6e52;}
+.slot-open{background:var(--panel2);color:var(--dim);border-style:dashed;}
+.rankhdr{display:flex;gap:8px;font:800 10px 'JetBrains Mono',monospace;
+  color:var(--dim);letter-spacing:.6px;text-transform:uppercase;
+  border-bottom:1px solid var(--line);padding:4px 0 6px;margin-bottom:2px;}
+.rk{font:800 15px 'JetBrains Mono',monospace;color:var(--dim);border-radius:6px;
+  padding:2px 0;}
+.vr{font:800 11px 'JetBrains Mono',monospace;padding:2px 8px;border-radius:6px;
+  border:1px solid var(--line);}
+.vr-value{background:#12301f;color:#6fe0a0;border-color:#2f6e52;}
+.vr-reach{background:#3a1414;color:#ff9c9c;border-color:#7a2f2f;}
+.vr-fair{background:var(--panel2);color:var(--dim);}
+.mine-tag{font:800 9px 'JetBrains Mono',monospace;background:var(--accent);
+  color:#06231a;border-radius:4px;padding:1px 6px;margin-left:4px;}
+.gone-tag{font:800 9px 'JetBrains Mono',monospace;background:var(--panel2);
+  color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:1px 6px;
+  margin-left:4px;}
+/* contextual insight cards */
+.insight{border-radius:10px;padding:10px 14px;margin:6px 0;
+  border:1px solid var(--line);background:var(--panel2);
+  border-left:3px solid var(--accent2);}
+.insight.i-cliff{border-left-color:var(--bad);}
+.insight.i-stack{border-left-color:var(--accent2);}
+.insight.i-combo{border-left-color:var(--accent);}
+.insight.i-snipe{border-left-color:var(--warn);}
+.insight.i-dark_horse{border-left-color:#e0a0ff;}
+.insight .it{font:800 13px 'Inter',sans-serif;color:var(--txt);}
+.insight .ib{font-size:12.5px;color:var(--dim);margin-top:2px;line-height:1.45;}
+
+/* ======================= MOBILE / PHONE (<=820px) ======================= */
+@media (max-width: 820px){
+  /* reclaim the huge default page padding on a phone */
+  .block-container{padding:0.6rem 0.7rem 4rem 0.7rem !important; max-width:100% !important;}
+  /* STACK columns vertically — Streamlit horizontal columns become slivers on
+     a phone; force each to full width so the board reads top-to-bottom */
+  [data-testid="stHorizontalBlock"]{flex-direction:column !important; gap:0.35rem !important;}
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+  [data-testid="stHorizontalBlock"] > [data-testid="column"]{
+    width:100% !important; flex:1 1 100% !important; min-width:0 !important;}
+  /* thumb-friendly buttons */
+  .stButton>button{min-height:46px !important; font-size:15px !important;
+    border-radius:10px !important;}
+  /* bigger form controls for touch (search box, selects, number inputs) */
+  [data-baseweb="select"] div, [data-baseweb="input"] input,
+  .stNumberInput input, .stSelectbox div{font-size:16px !important;}
+  /* hero card scales down but stays bold */
+  .hero{padding:14px 16px !important;}
+  .hero .nm{font-size:23px !important;}
+  /* metric tiles shrink so 4-across becomes a tidy stacked list */
+  [data-testid="stMetricValue"]{font-size:19px !important;}
+  [data-testid="stMetricLabel"]{font-size:10px !important;}
+  /* masthead: smaller so it doesn't eat the first screen */
+  .masthead{padding:10px 14px !important; gap:10px !important;}
+  .masthead h1{font-size:20px !important;}
+  .masthead .sub{font-size:10px !important;}
+  .masthead img{width:38px !important; height:38px !important;}
+  /* tables/rows: tighter, wrap-friendly */
+  .pname{font-size:15px !important;}
+  .pmeta{font-size:12px !important;}
+  .bdg{font-size:10px !important;}
+  /* sidebar is a drawer on mobile; widen its controls */
+  section[data-testid="stSidebar"]{min-width:88vw !important;}
+  /* keep the phone-only hint visible, hide the desktop-only one */
+  .only-desktop{display:none !important;}
+}
+@media (min-width: 821px){ .only-mobile{display:none !important;} }
 </style>
 """, unsafe_allow_html=True)
 
-
-def _badge_class(b: str) -> str:
-    u = b.upper()
-    if "VALUE +" in u:
-        return "bdg-val"
-    if "WON'T LAST" in u or "REACH" in u or "INJURY" in u or "BAD O-LINE" in u:
-        return "bdg-urgent"
-    if "CAN WAIT" in u:
-        return "bdg-wait"
-    if "TIER CLIFF" in u:
-        return "bdg-cliff"
-    if "STACK" in u:
-        return "bdg-stack"
-    if "SOFT" in u or "DOME" in u or "PACE" in u or "PASS-HEAVY" in u:
-        return "bdg-soft"
-    return "bdg-neutral"
-
-
-def _badges_html(badges: list) -> str:
-    return "".join(
-        f'<span class="bdg {_badge_class(b)}">{b}</span>' for b in badges) or \
-        '<span class="bdg bdg-neutral">—</span>'
-
-SCORING_KEYS = {"Standard (non-PPR)": "std", "Half PPR (0.5)": "half", "Full PPR (1.0)": "ppr"}
-SCORING_PRESET = {"std": "std", "half": "half", "ppr": "ppr"}
+SCORING_LABELS = {"Standard (non-PPR)": "std", "Half PPR": "half", "Full PPR": "ppr"}
+_POS_ORDER = ["QB", "RB", "WR", "TE", "FLEX", "DST", "K"]
 
 
 # --------------------------------------------------------------------------- state
 def _init_state():
     ss = st.session_state
-    ss.setdefault("drafted", set())              # names off the board
-    ss.setdefault("my_roster", [])               # list of (name, position)
-    ss.setdefault("current_overall", 1)          # overall pick number on the clock
-    ss.setdefault("espn", None)                  # EspnClient instance
+    ss.setdefault("drafted", set())          # set of player names off the board
+    ss.setdefault("my_roster", [])           # [(name, position)] — my team
+    ss.setdefault("current_overall", 1)      # overall pick on the clock (1-indexed)
+    ss.setdefault("team_rosters", {})        # {slot: [names]} — everyone
+    ss.setdefault("pick_log", [])            # [(overall, name, pos, slot)]
+    ss.setdefault("undo_stack", [])          # snapshots for undo
+    ss.setdefault("mode", "Mock")
+    ss.setdefault("mock_on", False)
+    ss.setdefault("espn", None)              # EspnClient or None
     ss.setdefault("espn_status", "")
-    ss.setdefault("opponents", None)             # LeagueOpponents (built lazily)
-    ss.setdefault("espn_auto", False)            # auto-poll toggle
-    ss.setdefault("espn_sync_note", "")          # last sync status
-    ss.setdefault("pick_log", [])                # [(overall, name, pos, slot)]
-    ss.setdefault("team_rosters", {})            # slot -> [names]
-    ss.setdefault("undo_stack", [])              # snapshots for undo
-    ss.setdefault("regret", [])                  # [(passed_name, taken_at, by)]
-    ss.setdefault("espn_s2", "")                 # persisted cookies (session only)
+    ss.setdefault("espn_s2", "")
     ss.setdefault("espn_swid", "")
-    # auto-load cookies from the local file (or browser) so you never re-type them
-    if not ss.espn_s2 and not ss.espn_swid and not ss.get("_cookie_autoload_done"):
+    ss.setdefault("sync_note", "")
+    ss.setdefault("_last_trash", "")
+    ss.setdefault("copilot_voice", True)
+    ss.setdefault("_mgr_dna", {})            # {owner_id: dna dossier} from past drafts
+    ss.setdefault("_slot_to_owner", {})      # {slot: (owner_id, name)} this season
+    ss.setdefault("_dna_note", "")           # status line after learning DNA
+    ss.setdefault("dna_seasons", "2021,2022,2023,2024,2025")
+    ss.setdefault("_manual_tendencies", {})  # {slot: {tendencies, rookie_averse}}
+    ss.setdefault("_cookie_loaded", False)
+    if not ss._cookie_loaded:
+        # CLOUD path: read ESPN cookies from st.secrets when present (Streamlit
+        # Community Cloud etc.). This is additive — on the DESKTOP there are no
+        # secrets, so it falls straight through to the existing file/browser
+        # auto-load below and nothing changes.
         try:
-            _s2, _swid, _src = SEC.auto_load()
+            _sec = st.secrets.get("espn", {}) if hasattr(st, "secrets") else {}
+            _s2 = _sec.get("espn_s2", "") or st.secrets.get("espn_s2", "")
+            _swid = _sec.get("swid", "") or st.secrets.get("swid", "")
             if _s2 or _swid:
                 ss.espn_s2, ss.espn_swid = _s2, _swid
-                ss["_cookie_source"] = _src
-        except Exception:
+                ss["_cookie_source"] = "secrets"
+        except Exception:  # noqa: BLE001 — no secrets configured (desktop) is fine
             pass
-        ss["_cookie_autoload_done"] = True
+        # DESKTOP path (unchanged): saved file, then browser auto-read.
+        if not (ss.espn_s2 or ss.espn_swid) and SEC is not None:
+            try:
+                s2, swid, _src = SEC.auto_load()
+                if s2 or swid:
+                    ss.espn_s2, ss.espn_swid = s2, swid
+            except Exception:  # noqa: BLE001
+                pass
+        ss._cookie_loaded = True
 
 
 _init_state()
 ss = st.session_state
 
 
-# --------------------------------------------------------------------------- sidebar
-st.sidebar.title("⚙️ League Setup")
-st.sidebar.caption("Everything here is dynamic — change it and the board re-ranks.")
-
-use_monday = st.sidebar.toggle("Load Monday preset (ESPN, 12-team, .5 PPR, pick 11)", value=True)
-mon = E.LeagueConfig.monday()
-
-# ---- league-preloaded settings (from ESPN mSettings on Connect) ----
-_lg = ss.get("_league_settings")   # dict from EspnClient.settings_profile()
-_use_lg = False
-if _lg:
-    _use_lg = st.sidebar.checkbox(
-        f"🔒 Use {_lg.get('league_name') or 'league'} settings "
-        f"({_lg['teams']}-team · {_lg.get('scoring_format','?')})",
-        value=True,
-        help="Auto-loaded from ESPN. Uncheck to set teams/scoring/lineup by hand.")
-
-def _lg_def(key, fallback):
-    """League value when locked-in, else the manual fallback."""
-    return (_lg.get(key) if (_use_lg and _lg and _lg.get(key) is not None)
-            else fallback)
-
-scoring_label = st.sidebar.selectbox("Scoring", list(SCORING_KEYS.keys()),
-                                     index=1, disabled=_use_lg)
-scoring_key = SCORING_KEYS[scoring_label]
-teams = st.sidebar.number_input("Teams", 4, 16,
-                                int(_lg_def("teams", mon.teams if use_monday else 12)),
-                                disabled=_use_lg)
-slot = st.sidebar.number_input("Your draft slot", 1, int(teams),
-                               mon.draft_slot if use_monday else 1)
-rounds = st.sidebar.number_input("Rounds", 8, 25, mon.rounds if use_monday else 16)
-
-# lineup defaults: league slots when locked, else Monday/manual
-_lgs = (_lg.get("starters") if (_use_lg and _lg and _lg.get("starters")) else None)
-def _slot_def(pos, fb):
-    return int(_lgs.get(pos, 0)) if _lgs else fb
-
-st.sidebar.markdown("**Starting lineup**"
-                    + ("  ·  🔒 from ESPN" if _use_lg and _lgs else ""))
-c1, c2 = st.sidebar.columns(2)
-qb = c1.number_input("QB", 0, 3, _slot_def("QB", 1), disabled=_use_lg and bool(_lgs))
-rb = c2.number_input("RB", 0, 5, _slot_def("RB", 2), disabled=_use_lg and bool(_lgs))
-wr = c1.number_input("WR", 0, 5, _slot_def("WR", 2), disabled=_use_lg and bool(_lgs))
-te = c2.number_input("TE", 0, 3, _slot_def("TE", 1), disabled=_use_lg and bool(_lgs))
-flex = c1.number_input("FLEX", 0, 3, _slot_def("FLEX", 1), disabled=_use_lg and bool(_lgs))
-superflex = c2.number_input("SUPERFLEX", 0, 2, _slot_def("SUPERFLEX", 0),
-                            disabled=_use_lg and bool(_lgs))
-dst = c1.number_input("D/ST", 0, 2, _slot_def("DST", 1), disabled=_use_lg and bool(_lgs))
-k = c2.number_input("K", 0, 2, _slot_def("K", 1), disabled=_use_lg and bool(_lgs))
-bench = st.sidebar.number_input("Bench", 0, 12,
-                                int(_lg_def("bench", 7)), disabled=_use_lg and bool(_lg and _lg.get("bench")))
-prefer_floor = st.sidebar.toggle("📊 Prioritize consistency (weekly floor)",
-                                 value=False,
-                                 help="Rank steady week-to-week producers over "
-                                      "boom/bust — 'highest-scoring consistently'.")
-
-starters = {"QB": qb, "RB": rb, "WR": wr, "TE": te, "FLEX": flex, "DST": dst, "K": k}
-if superflex:
-    starters["SUPERFLEX"] = superflex
-
-# Scoring: exact per-stat values from the league when locked, else the preset
-if _use_lg and _lg and _lg.get("scoring"):
-    _sc = _lg["scoring"]
-    scoring_obj = E.Scoring(**{k_: v_ for k_, v_ in _sc.items()
-                               if k_ in E.Scoring.__dataclass_fields__})
-    # scoring_key drives ADP-format lookup; derive from reception value
-    rp = _sc.get("reception", 0.5)
-    scoring_key = "ppr" if rp >= 1.0 else ("half" if rp >= 0.5 else "std")
-else:
-    scoring_obj = E.Scoring.preset(scoring_key)
-
-cfg = E.LeagueConfig(
-    teams=int(teams), draft_slot=int(slot), rounds=int(rounds),
-    scoring=scoring_obj,
-    starters={p: int(v) for p, v in starters.items() if v}, bench=int(bench),
-)
-
-# connection mode
-st.sidebar.markdown("---")
-# defaults so league_id/season always exist regardless of which mode branch runs
-# (tabs like Opponents reference league_id; Mock/Manual modes skip the ESPN block)
-league_id = ss.get("league_id", "")
-season = ss.get("season", 2026)
-mode = st.sidebar.radio("Draft connection",
-                        ["Manual entry", "ESPN live-connect", "Mock draft (practice)"])
-if mode == "Mock draft (practice)":
-    st.sidebar.caption("Practice against AI bots — they draft against you every "
-                       "turn so you can feel the real flow. No ESPN needed.")
-    mc = st.sidebar.columns(2)
-    if mc[0].button("🎬 Start / Restart mock"):
-        ss["_mock_action"] = "restart"
-    if mc[1].button("⏭️ Bots to my pick"):
-        ss["_mock_action"] = "advance"
-    st.sidebar.markdown("**Mock vs. your REAL league** 😈")
-    # pick from your saved leagues (or type an ID manually)
-    _mk_saved = SL.load()
-    _mk_id = ""
-    if _mk_saved:
-        _mk_opts = ["— type an ID below —"] + [SL.display_label(e) for e in _mk_saved]
-        _mk_pick = st.sidebar.selectbox("Mock against saved league", _mk_opts,
-                                        key="mock_league_pick")
-        if _mk_pick != _mk_opts[0]:
-            _idx = _mk_opts.index(_mk_pick) - 1
-            _mk_id = str(_mk_saved[_idx].get("league_id", ""))
-    # manual entry (used when no saved pick, or none saved yet)
-    _typed = st.sidebar.text_input("League ID (for DNA)",
-                                   value=_mk_id, key="mock_league")
-    _ml_league = _mk_id or _typed
-    ss["_mock_league_resolved"] = _ml_league
-    _ml_seasons = st.sidebar.text_input("Past seasons", value="2021,2022,2023,2024,2025",
-                                        key="mock_seasons")
-    if st.sidebar.button("🧬 Load opponents from history + start mock"):
-        ss["_mock_action"] = "restart_with_dna"
-    if ss.get("_mock_on"):
-        st.sidebar.success(f"Mock live · overall pick {ss.current_overall} · "
-                           f"your roster: {len(ss.my_roster)}")
-if mode == "ESPN live-connect":
-    if EC is None:
-        st.sidebar.error("espn_client unavailable (requests missing).")
-    else:
-        # cookies first — needed to resolve names + connect
-        _have_cookies = bool(ss.espn_s2 and ss.espn_swid)
-        if _have_cookies:
-            _src = ss.get("_cookie_source", "file")
-            _srclbl = {"file": "saved on this machine", "browser": "read from your browser",
-                       "manual": "entered this session",
-                       "login": "captured via ESPN login"}.get(_src, "loaded")
-            st.sidebar.success(f"🔓 ESPN cookies loaded ({_srclbl}) — no typing needed.")
-            with st.sidebar.expander("Change / manage cookies"):
-                if st.button("🔐 Re-login to ESPN (opens a window)", key="ck_relogin"):
-                    with st.spinner("Opening ESPN login… sign in there."):
-                        _r = ELOGIN.login()
-                    if _r.get("espn_s2") and _r.get("swid"):
-                        ss.espn_s2, ss.espn_swid = _r["espn_s2"], _r["swid"]
-                        SEC.save_file(_r["espn_s2"], _r["swid"])
-                        ss["_cookie_source"] = "login"
-                        st.success("Re-logged in — session refreshed.")
-                        st.rerun()
-                    else:
-                        st.error("Login didn't complete: "
-                                 + _r.get("error", "no session captured."))
-                s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2, key="ck_s2")
-                swid = st.text_input("SWID", type="password", value=ss.espn_swid, key="ck_swid")
-                cc = st.columns(2)
-                if cc[0].button("💾 Remember", key="ck_save"):
-                    ss.espn_s2, ss.espn_swid = s2, swid
-                    SEC.save_file(s2, swid)
-                    ss["_cookie_source"] = "file"
-                    st.success("Saved. Auto-loads every launch now.")
-                    st.rerun()
-                if cc[1].button("🗑 Forget", key="ck_forget"):
-                    SEC.forget()
-                    ss.espn_s2 = ss.espn_swid = ""
-                    ss["_cookie_source"] = "none"
-                    st.rerun()
+def _password_gate():
+    """Gate the app behind a password WHEN one is configured in st.secrets
+    (i.e. on the public cloud deploy). If no password is set — the normal
+    DESKTOP case — this is a no-op and the app runs exactly as before."""
+    try:
+        want = (st.secrets.get("app_password", "")
+                or st.secrets.get("password", "")) if hasattr(st, "secrets") else ""
+    except Exception:  # noqa: BLE001
+        want = ""
+    if not want:
+        return  # no password configured -> desktop / open, unchanged
+    if ss.get("_authed"):
+        return
+    # simple full-screen login
+    st.markdown("## 🎸 Project Shredder")
+    st.caption("Enter the access password to continue.")
+    with st.form("pw_gate", clear_on_submit=False):
+        pw = st.text_input("Password", type="password")
+        ok = st.form_submit_button("Enter", type="primary")
+    if ok:
+        if pw == want:
+            ss["_authed"] = True
+            st.rerun()
         else:
-            st.sidebar.markdown("**🔐 Log in to ESPN** — no cookies, no DevTools")
-            if st.sidebar.button("🔐 Log in to ESPN (opens a window)"):
-                with st.spinner("Opening ESPN login… sign in there, this grabs "
-                                "your session automatically."):
-                    _r = ELOGIN.login()
-                if _r.get("espn_s2") and _r.get("swid"):
-                    ss.espn_s2, ss.espn_swid = _r["espn_s2"], _r["swid"]
-                    SEC.save_file(_r["espn_s2"], _r["swid"])
-                    ss["_cookie_source"] = "login"
-                    st.sidebar.success("Logged in — session saved. Auto-loads from now on.")
-                    st.rerun()
-                else:
-                    st.sidebar.error("Login didn't complete: "
-                                     + _r.get("error", "no session captured."))
-            st.sidebar.caption("Opens a real ESPN login window. Sign in normally "
-                               "(password/MFA on ESPN's own page — we never see it); "
-                               "the app captures your session cookies when you're in.")
-            with st.sidebar.expander("…or paste cookies manually"):
-                s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2, key="ck_s2m")
-                swid = st.text_input("SWID", type="password", value=ss.espn_swid, key="ck_swidm")
-                cc = st.columns(2)
-                if cc[0].button("💾 Remember", key="ck_savem"):
-                    ss.espn_s2, ss.espn_swid = s2, swid
-                    SEC.save_file(s2, swid)
-                    ss["_cookie_source"] = "file"
-                    st.rerun()
-                if cc[1].button("🌐 From browser", key="ck_browserm"):
-                    _bs2, _bswid, _bmsg = SEC.read_from_browser()
-                    if _bs2 or _bswid:
-                        ss.espn_s2, ss.espn_swid = _bs2, _bswid
-                        SEC.save_file(_bs2, _bswid)
-                        ss["_cookie_source"] = "browser"
-                        st.success(_bmsg + " Saved.")
-                        st.rerun()
-                    else:
-                        st.info(_bmsg)
-                if s2:
-                    ss.espn_s2 = s2
-                if swid:
-                    ss.espn_swid = swid
-
-        # ---------- AUTO-DISCOVER: pull every league on the account ----------
-        if st.sidebar.button("🔎 Auto-discover my leagues"):
-            if not ss.espn_swid:
-                st.sidebar.warning("Paste your SWID (and espn_s2) above first.")
-            else:
-                with st.spinner("Asking ESPN for your leagues…"):
-                    res = EC.discover_leagues(ss.espn_s2, ss.espn_swid)
-                if res.get("ok") and res.get("leagues"):
-                    SL.bulk_upsert(res["leagues"])
-                    ss.espn_status = res["message"]
-                    st.sidebar.success(res["message"] + " Added to Saved leagues.")
-                    st.rerun()
-                else:
-                    st.sidebar.error(res.get("message", "Discovery failed."))
-
-        # ---------- SAVED LEAGUES: preload IDs, pick one at draft time ----------
-        _saved = SL.load()
-        st.sidebar.markdown("**📁 Saved leagues**")
-        _default_season = 2026
-        if _saved:
-            _opts = ["— pick a saved league —"] + [SL.display_label(e) for e in _saved]
-            _sel = st.sidebar.selectbox("Select league", _opts,
-                                        label_visibility="collapsed")
-            _picked = None
-            if _sel != _opts[0]:
-                _picked = _saved[_opts.index(_sel) - 1]
-            if _picked:
-                league_id = str(_picked["league_id"])
-                season = int(_picked.get("season", _default_season))
-                if _picked.get("resolved") and _picked.get("my_team_name"):
-                    st.sidebar.caption(f'🏈 Your team: **{_picked["my_team_name"]}**'
-                                       f' · {_picked.get("team_count","?")}-team')
-            else:
-                league_id, season = "", _default_season
-        else:
-            st.sidebar.caption("No saved leagues yet — add your league IDs below "
-                               "so you can pick them fast when drafts go live.")
-            league_id, season = "", _default_season
-
-        with st.sidebar.expander("➕ Add / manage saved leagues"):
-            _new_id = st.text_input("League ID to save", key="sl_new_id")
-            _new_season = st.number_input("Season", 2020, 2030, _default_season,
-                                          key="sl_new_season")
-            _new_label = st.text_input("Nickname (optional)", key="sl_new_label")
-            if st.button("Save league ID", key="sl_add"):
-                if _new_id.strip().isdigit():
-                    SL.add(int(_new_id), int(_new_season), _new_label.strip())
-                    st.success(f"Saved league {_new_id}. Now hit "
-                               "'Resolve names' to pull its ESPN name + your team.")
-                    st.rerun()
-                else:
-                    st.warning("Enter a numeric league ID.")
-            if _saved:
-                st.markdown("---")
-                if st.button("🔄 Resolve names for all (needs cookies)",
-                             key="sl_resolve"):
-                    if not (ss.espn_s2 and ss.espn_swid):
-                        st.warning("Add espn_s2 + SWID above first — private "
-                                   "leagues need them to read names.")
-                    else:
-                        _ok, _fail = 0, 0
-                        for e in _saved:
-                            try:
-                                _cli = EC.EspnClient(int(e["league_id"]),
-                                                     int(e.get("season", _default_season)),
-                                                     ss.espn_s2, ss.espn_swid)
-                                SL.update_resolved(_cli.league_profile())
-                                _ok += 1
-                            except Exception:  # noqa: BLE001
-                                _fail += 1
-                        st.success(f"Resolved {_ok} league(s)"
-                                   + (f", {_fail} failed" if _fail else "") + ".")
-                        st.rerun()
-                _rm = st.selectbox("Remove a league",
-                                   ["—"] + [SL.display_label(e) for e in _saved],
-                                   key="sl_rm")
-                if _rm != "—" and st.button("Delete", key="sl_del"):
-                    _t = _saved[[SL.display_label(e) for e in _saved].index(_rm)]
-                    SL.remove(_t["league_id"], _t.get("season", _default_season))
-                    st.rerun()
-
-        st.sidebar.markdown("**Connect to a draft**")
-        league_id = st.sidebar.text_input("ESPN league ID",
-                                          value=str(league_id or ""),
-                                          key="espn_league_id")
-        season = st.sidebar.number_input("Season", 2020, 2030, int(season))
-        _dna_seasons_txt = st.sidebar.text_input(
-            "Learn opponent DNA from seasons", value="2021,2022,2023,2024,2025",
-            help="Past seasons of THIS league to learn each manager's real "
-                 "draft tendencies (RB-early, WR-zealot, etc). Blank = skip.")
-        with st.sidebar.expander("How to get espn_s2 / SWID"):
-            st.write("Log into ESPN in your browser → DevTools (F12) → "
-                     "Application → Cookies → espn.com → copy `espn_s2` and `SWID`. "
-                     "Once connected, cookies are remembered — to switch leagues "
-                     "just pick a saved league (or change the League ID) and hit "
-                     "Connect again.")
-        if st.sidebar.button("Connect"):
-            if not str(league_id).strip().isdigit():
-                ss.espn_status = ("Enter a numeric ESPN League ID first "
-                                  "(e.g. 630798), then hit Connect.")
-            try:
-                if not str(league_id).strip().isdigit():
-                    raise ValueError("skip")   # guarded above; do nothing
-                cli = EC.EspnClient(int(league_id), int(season),
-                                    ss.espn_s2, ss.espn_swid)
-                ok, msg = cli.verify()
-                ss.espn = cli if ok else None
-                ss.espn_status = msg
-                if ok:
-                    # cache league profile (name + my team) for later weeks
-                    try:
-                        SL.update_resolved(cli.league_profile())
-                    except Exception:  # noqa: BLE001
-                        pass
-                    # real team + owner names per draft slot (replaces 'slot N')
-                    try:
-                        ss["_slot_labels"] = cli.slot_labels()
-                    except Exception:  # noqa: BLE001
-                        ss["_slot_labels"] = {}
-                    # league settings (teams/scoring/lineup) -> engine defaults
-                    try:
-                        ss["_league_settings"] = cli.settings_profile()
-                    except Exception:  # noqa: BLE001
-                        ss["_league_settings"] = None
-                    # ---- learn opponent DNA from past drafts (auto on connect) ----
-                    ss["_dna_note"] = ""
-                    try:
-                        yrs = [int(y) for y in _dna_seasons_txt.replace(" ", "").split(",")
-                               if y.strip().isdigit()]
-                    except Exception:  # noqa: BLE001
-                        yrs = []
-                    if yrs:
-                        with st.spinner(f"Learning opponent DNA from {yrs}…"):
-                            try:
-                                drafts = LH.pull_past_drafts(int(league_id), yrs,
-                                                             ss.espn_s2, ss.espn_swid)
-                                mgr_dna = LH.learn_dna_by_manager(drafts) if drafts else {}
-                                s2o = LH.current_slot_to_owner(int(league_id), int(season),
-                                                               ss.espn_s2, ss.espn_swid)
-                                ss["_mgr_dna"] = mgr_dna
-                                ss["_slot_to_owner"] = s2o
-                                # who DRAFTED each player, by year (not EOY ownership)
-                                ss["_draft_hist"] = (LH.player_draft_history(drafts)
-                                                     if drafts else {})
-                                _learned = sum(1 for d in mgr_dna.values()
-                                               if d["tendencies"] != ["ADP-robot"])
-                                ss["_dna_note"] = (
-                                    f"🧬 Learned DNA for {len(mgr_dna)} managers "
-                                    f"({_learned} with a real lean) across "
-                                    f"{len(drafts)} past draft(s).")
-                            except Exception as ex:  # noqa: BLE001
-                                ss["_mgr_dna"] = {}
-                                ss["_slot_to_owner"] = {}
-                                ss["_dna_note"] = f"DNA learn failed: {ex}"
-            except Exception as ex:  # noqa: BLE001
-                if str(ex) != "skip":
-                    ss.espn = None
-                    ss.espn_status = f"Connect failed: {ex}"
-        if ss.espn_status:
-            (st.sidebar.success if ss.espn else st.sidebar.error)(ss.espn_status)
-        if ss.get("_dna_note"):
-            st.sidebar.caption(ss["_dna_note"])
+            st.error("Wrong password.")
+    st.stop()
 
 
-# --------------------------------------------------------------------------- data
-@st.cache_data(show_spinner=False)
-def _pool():
+_password_gate()
+
+
+@st.cache_data(show_spinner="Loading player projections…")
+def _load_pool():
     return P.load_players(prefer_live=True)
 
 
-pool = _pool()
+pool = _load_pool()
 name_to_raw = {p.name: p for p in pool}
 
 
+def _render_masthead():
+    """PROJECT SHREDDER masthead — the icon + name + tagline, rendered once up top."""
+    uri = _icon_data_uri("shredder_icon_128.png") or _icon_data_uri("shredder_icon.png")
+    img = f'<img src="{uri}" alt="Shredder">' if uri else '<span style="font-size:40px;">🎸</span>'
+    st.markdown(
+        f'<div class="masthead">{img}<div>'
+        f'<h1>PROJECT SHREDDER</h1>'
+        f'<div class="sub">// live-draft copilot · VORP + edge engine · '
+        f'contextual insights · shred the board</div>'
+        f'</div></div>', unsafe_allow_html=True)
+
+
+_render_masthead()
+
+
+@st.cache_data(show_spinner="Building rankings…")
+def _rankings_cached(scoring_key, teams, rounds, bench, starters_key, npool):
+    """Full-pool value ranking. Cached on the league shape (not on drafted state)
+    so the ranks stay STABLE as a reference board — the UI crosses off drafted
+    players at render time. `npool` in the key busts the cache if the pool
+    reloads (live vs seed)."""
+    _cfg = E.LeagueConfig(
+        teams=int(teams), draft_slot=1, rounds=int(rounds),
+        scoring=E.Scoring.preset(scoring_key),
+        starters=dict(starters_key), bench=int(bench))
+    return SR.build_rankings(pool, _cfg, scoring_key, top_n=max(300, npool))
+
+
+# --------------------------------------------------------------------------- helpers
 def _snapshot():
-    import copy
     return {
         "drafted": set(ss.drafted), "my_roster": list(ss.my_roster),
-        "current_overall": ss.current_overall,
-        "pick_log": list(ss.pick_log),
+        "current_overall": ss.current_overall, "pick_log": list(ss.pick_log),
         "team_rosters": copy.deepcopy(ss.team_rosters),
     }
 
 
-def _record_pick(name, position, mine: bool):
-    """Log a pick, update rosters, push undo snapshot, and note any regret."""
+def _push_undo():
     ss.undo_stack.append(_snapshot())
-    ss.undo_stack[:] = ss.undo_stack[-30:]
-    ov = int(ss.current_overall)
-    slot = O._snake_slot(ov, int(teams))
-    ss.pick_log.append((ov, name, position, slot))
-    ss.team_rosters.setdefault(slot, []).append(name)
-    ss.drafted.add(name)
-    if mine:
-        ss.my_roster.append((name, position))
-        ss["_last_trash"] = CO.trash_talk(name)
-        # SHADOW LEDGER: log what Shredder recommended here vs what I took
-        try:
-            _rnd = (ov - 1) // int(teams) + 1
-            _top = ss.get("_top_rec")   # stashed by the board each render
-            if _top:
-                SLG.record_pick(
-                    overall=ov, round_=_rnd,
-                    shredder_pick=_top.get("name"), shredder_pos=_top.get("position"),
-                    shredder_adp=_top.get("adp"),
-                    shredder_reason=" · ".join(_top.get("badges", [])[:3]),
-                    actual_pick=name, actual_pos=position,
-                    league_id=(int(league_id) if str(league_id).isdigit() else None),
-                    season=int(season) if str(season).isdigit() else None)
-        except Exception:  # noqa: BLE001 — ledger must never block a pick
-            pass
-    else:
-        opps.note_pick(slot, position)
-        # regret: log a player I passed who just went to someone else
-        ss.regret.append((name, ov, f"slot {slot}"))
-        ss.regret[:] = ss.regret[-50:]
-    ss.current_overall = ov + 1
-    # in mock mode, after MY pick the bots immediately draft to my next turn
-    if mine and ss.get("_mock_on"):
-        _r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
-                                     int(ss.current_overall), opponents=opps,
-                                     pick_log=ss.pick_log)
-        ss.current_overall = _r["now_overall"]
+    ss.undo_stack[:] = ss.undo_stack[-40:]
 
 
 def _undo():
@@ -652,1509 +426,1066 @@ def _undo():
     return True
 
 
-# --------------------------------------------------------------------------- ESPN sync
-def _sync_espn():
+def _rankings_cache(scoring_key):
+    """Build (or fetch cached) full-pool rankings for the current league shape."""
+    return _rankings_cached(
+        scoring_key, int(teams), int(rounds), int(bench),
+        tuple(sorted((p, int(v)) for p, v in starters.items() if v)), len(pool))
+
+
+def _restore_player(name):
+    """Put a crossed-off player back on the board (remove from drafted / rosters /
+    my_roster / pick_log). Used by the rankings guide's Undo button."""
+    _push_undo()
+    ss.drafted.discard(name)
+    ss.my_roster = [(n, p) for n, p in ss.my_roster if n != name]
+    for slot_id, names in list(ss.team_rosters.items()):
+        ss.team_rosters[slot_id] = [n for n in names if n != name]
+    ss.pick_log = [row for row in ss.pick_log if row[1] != name]
+
+
+def _record_pick(cfg, name, position, mine, opps, advance=True):
+    """Log one pick and update all rosters. If `mine`, it joins my team. In mock
+    mode, after MY pick the bots draft forward to my next turn automatically."""
+    if name in ss.drafted:
+        return
+    _push_undo()
+    ov = int(ss.current_overall)
+    slot = O._snake_slot(ov, int(cfg.teams))
+    ss.pick_log.append((ov, name, position, slot))
+    ss.team_rosters.setdefault(slot, []).append(name)
+    ss.drafted.add(name)
+    if mine:
+        ss.my_roster.append((name, position))
+        # Shredder attitude: a cocky one-liner to paste in the league chat,
+        # stashed so it survives the rerun and shows on the board.
+        ss["_last_trash"] = CO.trash_talk(name)
+    ss.current_overall = ov + 1
+    if advance and mine and ss.get("mock_on"):
+        r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
+                                    int(ss.current_overall), opponents=opps,
+                                    pick_log=ss.pick_log)
+        ss.current_overall = r["now_overall"]
+
+
+def _mark_gone(cfg, name, opps):
+    """Someone else drafted `name`. Take them off the board (position pulled from
+    the pool) and requeue — the board recomputes on the next run automatically."""
+    raw = name_to_raw.get(name)
+    pos = raw.position if raw else "?"
+    _record_pick(cfg, name, pos, mine=False, opps=opps, advance=False)
+
+
+def _reset_board():
+    ss.drafted = set(); ss.my_roster = []; ss.team_rosters = {}
+    ss.pick_log = []; ss.undo_stack = []; ss.current_overall = 1
+
+
+def _start_mock(cfg, opps):
+    _reset_board()
+    ss.mock_on = True
+    r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
+                                int(ss.current_overall), opponents=opps,
+                                pick_log=ss.pick_log)
+    ss.current_overall = r["now_overall"]
+
+
+def _learn_dna(league_id, season, seasons_txt):
+    """Learn each manager's draft DNA from past seasons and map it to this
+    year's slots. Populates ss._mgr_dna + ss._slot_to_owner so the survival
+    model + prophecy know how each specific opponent tends to draft. Best-effort:
+    on any failure it leaves the defaults in place."""
+    if LH is None:
+        ss._dna_note = "Opponent DNA unavailable (league_history not loaded)."
+        return
+    try:
+        yrs = [int(y) for y in str(seasons_txt).replace(" ", "").split(",")
+               if y.strip().isdigit()]
+    except Exception:  # noqa: BLE001
+        yrs = []
+    if not yrs:
+        ss._dna_note = "No past seasons given — opponents use default tendencies."
+        return
+    try:
+        drafts = LH.pull_past_drafts(int(league_id), yrs, ss.espn_s2, ss.espn_swid)
+        if not drafts:
+            ss._mgr_dna, ss._slot_to_owner = {}, {}
+            ss._dna_note = ("No draft history found for those seasons — opponents "
+                            "use default tendencies.")
+            return
+        # DEEP analysis: context-normalized, recency-weighted, confidence-scored,
+        # scoring-change aware, and POOLED ACROSS YOUR OTHER LEAGUES for any
+        # manager you share more than one league with (bigger sample = stronger
+        # read). Falls back to the simpler learner if unavailable.
+        try:
+            import manager_analysis as MA
+            # gather every OTHER saved league you can read, to pool shared managers
+            league_drafts = {int(league_id): drafts}
+            league_ctx = {int(league_id):
+                          LH.season_contexts(int(league_id), yrs,
+                                             ss.espn_s2, ss.espn_swid)}
+            try:
+                other = [int(e["league_id"]) for e in (SL.load() if SL else [])
+                         if str(e.get("league_id")).isdigit()
+                         and int(e["league_id"]) != int(league_id)]
+            except Exception:  # noqa: BLE001
+                other = []
+            _lg_names = {}
+            try:
+                _lg_names = {int(e["league_id"]):
+                             (e.get("league_name") or e.get("label")
+                              or f"League {e['league_id']}")
+                             for e in (SL.load() if SL else [])
+                             if str(e.get("league_id")).isdigit()}
+            except Exception:  # noqa: BLE001
+                _lg_names = {}
+            for _oid in other[:6]:      # cap to keep connect snappy
+                try:
+                    _od = LH.pull_past_drafts(_oid, yrs, ss.espn_s2, ss.espn_swid)
+                    if _od:
+                        league_drafts[_oid] = _od
+                        league_ctx[_oid] = LH.season_contexts(_oid, yrs,
+                                                              ss.espn_s2, ss.espn_swid)
+                except Exception:  # noqa: BLE001
+                    pass
+            if len(league_drafts) > 1:
+                mgr_dna = MA.analyze_across_leagues(league_drafts, league_ctx,
+                                                    current_scoring_key=scoring_key,
+                                                    league_names=_lg_names)
+            else:
+                mgr_dna = MA.analyze_managers(
+                    drafts, league_ctx[int(league_id)],
+                    current_scoring_key=scoring_key)
+        except Exception:  # noqa: BLE001
+            mgr_dna = LH.learn_dna_by_manager(drafts)
+        s2o = LH.current_slot_to_owner(int(league_id), int(season),
+                                       ss.espn_s2, ss.espn_swid)
+        ss._mgr_dna = mgr_dna
+        ss._slot_to_owner = s2o
+        learned = sum(1 for d in mgr_dna.values()
+                      if d.get("tendencies") != ["ADP-robot"])
+        if s2o:
+            # DNA is pinned to this year's seats — the full draft-day read is live.
+            ss._dna_note = (f"🧬 DNA locked in: {len(mgr_dna)} managers "
+                            f"({learned} with a real lean) mapped to their seats "
+                            f"across {len(drafts)} past draft(s). Snipes + "
+                            f"survival odds now know how each rival drafts.")
+        else:
+            # Learned the managers, but ESPN hasn't published this year's draft
+            # ORDER yet — so we can't attach DNA to seats. Common the day before.
+            ss._dna_note = (f"🧬 Learned {len(mgr_dna)} managers' DNA "
+                            f"({learned} with a real lean), but ESPN hasn't set "
+                            f"this year's DRAFT ORDER yet — so it can't map to "
+                            f"seats. Hit '🧬 Re-learn' once the order is posted "
+                            f"(usually just before the draft) to light up snipes.")
+    except Exception as ex:  # noqa: BLE001
+        ss._mgr_dna, ss._slot_to_owner = {}, {}
+        ss._dna_note = f"DNA learn failed ({ex}); using default tendencies."
+
+
+def _apply_dna_to_opponents(opps):
+    """Stamp learned manager DNA (tendencies, rookie-aversion, real names) onto
+    the opponent profiles by this year's seat, and build the loyalty map prophecy
+    uses to predict the ACTUAL player each manager keeps drafting."""
+    mgr_dna = ss.get("_mgr_dna") or {}
+    s2o = ss.get("_slot_to_owner") or {}
+    loyalty_by_slot = {}
+
+    # Manual tendency tags (Mock practice) reapply every run so they survive
+    # profile rebuilds. Applied FIRST so learned ESPN DNA can override if present.
+    for slot_id, tag in (ss.get("_manual_tendencies") or {}).items():
+        prof = opps.profiles.get(int(slot_id)) if hasattr(opps, "profiles") else None
+        if prof is not None:
+            prof.tendencies = tag.get("tendencies") or ["ADP-robot"]
+            prof.rookie_averse = bool(tag.get("rookie_averse"))
+
+    if not mgr_dna or not s2o or LH is None:
+        return loyalty_by_slot
+    try:
+        LH.apply_manager_dna(opps, mgr_dna, s2o)
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _ln(s):
+        s = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", (s or "").lower().strip())
+        s = re.sub(r"[^a-z0-9 ]", "", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    for slot, owner_tuple in s2o.items():
+        owner = owner_tuple[0] if isinstance(owner_tuple, (list, tuple)) else owner_tuple
+        d = mgr_dna.get(owner)
+        prof = opps.profiles.get(int(slot)) if hasattr(opps, "profiles") else None
+        if not d:
+            continue
+        # real owner name on the seat (so banners say "Marcus" not "slot 4")
+        if prof is not None and d.get("manager_name"):
+            prof.name = d["manager_name"]
+        # loyalty: players this manager drafts repeatedly -> prophecy predicts them
+        if d.get("favorite_players"):
+            loyalty_by_slot[int(slot)] = {_ln(nm): c
+                                          for nm, c in d["favorite_players"].items()}
+    return loyalty_by_slot
+
+
+def _sync_espn(cfg, force=False):
+    """Pull the live draft state from ESPN and fold every pick into the board."""
     if not ss.espn:
         return
     try:
         state = ss.espn.draft_state()
     except Exception as ex:  # noqa: BLE001
-        st.warning(f"ESPN poll failed (using last state): {ex}")
+        ss.sync_note = f"ESPN poll failed (kept last state): {ex}"
         return
-    # map ESPN picks -> our drafted set via NORMALIZED name against the pool,
-    # so suffix/punctuation differences (Jr./III, D.J. vs DJ) never miss.
-    try:
-        import live_feed as _lf
-        _norm = _lf._norm
-    except Exception:
-        def _norm(s):  # fallback: lowercase alnum
-            import re as _re
-            return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
+    if getattr(state, "complete", False) and not getattr(state, "in_progress", False) \
+            and not force:
+        ss.sync_note = ("Finished draft detected — not auto-loading it. "
+                        "Hit Sync now to review it, or start a Mock instead.")
+        return
     pool_by_norm = {_norm(p.name): p.name for p in pool}
-    my_slot = int(slot)
+    my_slot = int(cfg.draft_slot)
+    teams = int(cfg.teams)
     matched, unmatched = 0, []
-    for pk in state.picks:
+    # rebuild from scratch so ESPN is the source of truth for the live board
+    drafted, my_roster, team_rosters, pick_log = set(), [], {}, []
+    for pk in sorted(state.picks, key=lambda x: getattr(x, "overall", 0) or 0):
         nm = pk.player_name
         if not nm:
             continue
-        canon = pool_by_norm.get(_norm(nm), nm)   # map to our pool name if we can
-        ss.drafted.add(canon)
+        canon = pool_by_norm.get(_norm(nm), nm)
+        ov = getattr(pk, "overall", 0) or (len(pick_log) + 1)
+        slot = O._snake_slot(ov, teams)
+        pos = pk.position or (name_to_raw[canon].position
+                              if canon in name_to_raw else "?")
+        drafted.add(canon)
+        team_rosters.setdefault(slot, []).append(canon)
+        pick_log.append((ov, canon, pos, slot))
+        if slot == my_slot:
+            my_roster.append((canon, pos))
         matched += 1
-        # is this MY pick? (ESPN draft_slot matches my configured slot)
-        if getattr(pk, "draft_slot", None) == my_slot and \
-           canon not in {n for n, _ in ss.my_roster}:
-            pos = pk.position or (name_to_raw.get(canon).position
-                                  if name_to_raw.get(canon) else "")
-            if pos:
-                ss.my_roster.append((canon, pos))
         if _norm(nm) not in pool_by_norm:
             unmatched.append(nm)
-    ss.current_overall = len(state.picks) + 1
-    ss.espn_on_clock = getattr(state, "on_the_clock_team", None)
-    ss.espn_sync_note = (f"Synced {matched} picks."
-                         + (f" ⚠️ {len(unmatched)} not in pool: "
-                            + ", ".join(unmatched[:5]) if unmatched else ""))
+    ss.drafted = drafted
+    ss.my_roster = my_roster
+    ss.team_rosters = team_rosters
+    ss.pick_log = sorted(pick_log)
+    ss.current_overall = len(pick_log) + 1
+    ss.sync_note = (f"Synced {matched} picks from ESPN."
+                    + (f"  ({len(unmatched)} names not in pool: "
+                       + ", ".join(unmatched[:4]) + "…)" if unmatched else ""))
+
+
+def _badge_class(b: str) -> str:
+    u = b.upper()
+    if "VALUE +" in u:
+        return "bdg-val"
+    if "WON'T LAST" in u or "REACH" in u or "OUT" in u:
+        return "bdg-urgent"
+    if "FILLS NEED" in u:
+        return "bdg-need"
+    if "TIER CLIFF" in u:
+        return "bdg-cliff"
+    return "bdg"
+
+
+def _badges_html(badges, limit=4):
+    return "".join(f'<span class="bdg {_badge_class(b)}">{b}</span>'
+                   for b in badges[:limit])
+
+
+def _need_summary(rstate) -> str:
+    """One plain-English line about what the roster still needs to start."""
+    opens = []
+    for p in ("QB", "RB", "WR", "TE", "DST", "K"):
+        n = rstate["starter_open"].get(p, 0)
+        if n > 0:
+            opens.append(f"{n}×{p}")
+    if rstate["flex_open"] > 0:
+        opens.append(f"{rstate['flex_open']}×FLEX")
+    if not opens:
+        return "Starting lineup is full — now drafting the best bench value."
+    return "Still need to start: " + ", ".join(opens) + "."
+
+
+def _render_roster_panel(rstate, cfg):
+    """Your starting lineup, filling up slot by slot, then your bench."""
+    st.markdown("#### Your lineup")
+    counts = dict(rstate["counts"])
+    filled_chips = []
+    # dedicated starter slots
+    for pos in ("QB", "RB", "WR", "TE", "DST", "K"):
+        for i in range(cfg.starters.get(pos, 0)):
+            if counts.get(pos, 0) > 0:
+                counts[pos] -= 1
+                filled_chips.append((pos, True))
+            else:
+                filled_chips.append((pos, False))
+    # flex slots — fill from leftover RB/WR/TE
+    for i in range(rstate["flex_slots"]):
+        took = None
+        for p in ("RB", "WR", "TE"):
+            if counts.get(p, 0) > 0:
+                counts[p] -= 1
+                took = p
+                break
+        filled_chips.append(("FLEX" if took is None else f"FLEX·{took}",
+                             took is not None))
+    html = ""
+    for label, filled in filled_chips:
+        cls = "slot-filled" if filled else "slot-open"
+        html += f'<span class="slotchip {cls}">{label}</span>'
+    st.markdown(f'<div>{html}</div>', unsafe_allow_html=True)
+
+    # the actual players, grouped
+    if ss.my_roster or any(ss.team_rosters.get(int(cfg.draft_slot), [])):
+        st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+        mine = list(ss.my_roster)
+        seen = {n for n, _ in mine}
+        for nm in ss.team_rosters.get(int(cfg.draft_slot), []):
+            if nm not in seen:
+                raw = name_to_raw.get(nm)
+                if raw:
+                    mine.append((nm, raw.position))
+        by_pos = {}
+        for nm, pos in mine:
+            by_pos.setdefault(pos, []).append(nm)
+        for pos in ("QB", "RB", "WR", "TE", "DST", "K"):
+            for nm in by_pos.get(pos, []):
+                st.markdown(
+                    f'<div class="rowline"><span class="pill pos-{pos}">{pos}</span> '
+                    f'<span class="pname" style="font-size:14px;">{nm}</span></div>',
+                    unsafe_allow_html=True)
+    else:
+        st.caption("No players yet — draft your first pick.")
+
+
+def _render_why(rec, key):
+    """The 'why this pick' breakdown — an itemized, plain-English view of every
+    factor that went into this player's score, straight from the engine."""
+    with st.expander("🔍 Why this pick? — full breakdown", expanded=False):
+        # context rows (value is None) first, then scored factors
+        ctx = [e for e in rec.explain if e.get("value") is None]
+        scored = [e for e in rec.explain if e.get("value") is not None]
+        if ctx:
+            st.markdown("**The data**")
+            for e in ctx:
+                st.markdown(
+                    f'<div class="pmeta" style="margin:2px 0;">'
+                    f'<b style="color:var(--txt);">{e["label"]}:</b> {e["detail"]}'
+                    f'</div>', unsafe_allow_html=True)
+        if scored:
+            st.markdown("**How the score adds up**")
+            for e in scored:
+                v = e["value"]
+                col = "var(--good)" if v > 0 else ("var(--bad)" if v < 0 else "var(--dim)")
+                sign = "+" if v > 0 else ""
+                st.markdown(
+                    f'<div style="display:flex;gap:10px;align-items:baseline;'
+                    f'margin:3px 0;border-bottom:1px solid var(--line);padding-bottom:3px;">'
+                    f'<span style="font-family:JetBrains Mono,monospace;font-weight:800;'
+                    f'color:{col};min-width:56px;text-align:right;">{sign}{v:g}</span>'
+                    f'<span><b style="color:var(--txt);">{e["label"]}</b> '
+                    f'<span class="pmeta">— {e["detail"]}</span></span></div>',
+                    unsafe_allow_html=True)
+            total = sum(e["value"] for e in scored)
+            st.markdown(
+                f'<div style="margin-top:6px;font-family:JetBrains Mono,monospace;'
+                f'font-weight:800;color:var(--accent);">= {total:g} composite '
+                f'score</div>', unsafe_allow_html=True)
+        if rec.injury_note:
+            st.info(f"🏥 {rec.injury_note}")
+
+
+def _render_insights(insights, cfg, opps):
+    """Render the contextual insight cards that popped up for this pick. Each
+    can carry a one-click Draft button for the player it suggests."""
+    if not insights:
+        return
+    for i, ins in enumerate(insights):
+        st.markdown(
+            f'<div class="insight i-{ins["kind"]}">'
+            f'<div class="it">{ins["icon"]} {ins["title"]}</div>'
+            f'<div class="ib">{ins["body"]}</div></div>',
+            unsafe_allow_html=True)
+        player = ins.get("player")
+        if player and player not in ss.drafted:
+            bc = st.columns([1, 1, 4])
+            if bc[0].button(f"✓ Draft {player.split()[-1]}",
+                            key=f"ins_draft_{ins['kind']}_{i}",
+                            use_container_width=True):
+                _record_pick(cfg, player, ins.get("position") or "?",
+                             mine=True, opps=opps)
+                st.rerun()
+            if bc[1].button("✗ Gone", key=f"ins_gone_{ins['kind']}_{i}",
+                            use_container_width=True):
+                _mark_gone(cfg, player, opps)
+                st.rerun()
+
+
+def _render_rivals_forecast(cfg, opps, loyalty_by_slot):
+    """Crystal ball: predict what each opponent between now and your next pick
+    will take, and flag which top players are likely to SURVIVE to you. This is
+    the 'who's left for me' view, powered by opponent DNA + loyalty."""
+    ovn = int(ss.current_overall)
+    nxt = next((p for p in cfg.my_overall_picks() if p > ovn), None)
+    if nxt is None or nxt <= ovn:
+        return
+    try:
+        preds = PROPH.predict_board(pool, cfg, set(ss.drafted), ovn,
+                                    opponents=opps, scoring_key=scoring_key,
+                                    horizon=int(cfg.teams) * 2,
+                                    loyalty_by_slot=loyalty_by_slot or {})
+    except Exception:  # noqa: BLE001
+        return
+    between = [p for p in preds if not p.is_me and ovn <= p.overall < nxt]
+    if not between:
+        return
+    dna_on = bool(ss.get("_mgr_dna"))
+    label = ("using each seat's learned DNA" if dna_on
+             else "using ADP + default tendencies (connect ESPN + learn DNA for "
+                  "real per-manager reads)")
+    # slot -> deep profile (for confidence + scouting read on each rival)
+    _mgr = ss.get("_mgr_dna") or {}
+    _s2o = ss.get("_slot_to_owner") or {}
+    _slot_prof = {}
+    for _sl, _ot in _s2o.items():
+        _own = _ot[0] if isinstance(_ot, (list, tuple)) else _ot
+        if _mgr.get(_own):
+            _slot_prof[int(_sl)] = _mgr[_own]
+
+    with st.expander(f"🔮 Who's left for you? — {len(between)} picks until you're up "
+                     f"({label})", expanded=False):
+        # 1) predicted picks before you
+        st.markdown("**Rivals on the clock before you**")
+        likely_gone = set()
+        for p in between:
+            if not p.top:
+                continue
+            who = (opps.profiles[p.slot].name
+                   if p.slot in opps.profiles and opps.profiles[p.slot].name
+                   else f"slot {p.slot}")
+            nm, pos, conf = p.top[0]
+            likely_gone.add(nm)
+            alts = " / ".join(f"{n} ({ps})" for n, ps, _ in p.top[1:3])
+            # deep scouting chip: confidence-graded read of this manager
+            _dp = _slot_prof.get(p.slot)
+            scout = ""
+            if _dp:
+                cl = _dp.get("confidence_label", "")
+                lean = ", ".join(t for t in _dp.get("tendencies", [])
+                                 if t != "ADP-robot")[:40] or "balanced"
+                qf = _dp.get("qb_first_round")
+                qbnote = (f" · QB early (~r{qf:.0f})" if qf and qf <= 5
+                          else f" · streams QB (~r{qf:.0f})" if qf else "")
+                pooled = (" · 🔗pooled" if _dp.get("cross_league") else "")
+                scout = (f'<br/><span style="color:var(--dim);font-size:11px;">'
+                         f'   ↳ {cl} read: {lean}{qbnote}{pooled}</span>')
+            st.markdown(
+                f'<div class="rowline pmeta">#{p.overall} · <b style="color:var(--txt);">'
+                f'{who}</b> → likely <b style="color:var(--warn);">{nm}</b> '
+                f'<span class="pill pos-{pos}" style="font-size:10px;">{pos}</span> '
+                f'({int(conf*100)}%)' + (f' · else {alts}' if alts else '')
+                + scout + '</div>',
+                unsafe_allow_html=True)
+        # 2) top players predicted to SURVIVE to your next pick
+        top_now = [r for r in recs[:14] if r.name not in likely_gone]
+        if top_now:
+            st.markdown("**Should still be there at your next pick**")
+            for r in top_now[:6]:
+                st.markdown(
+                    f'<div class="rowline pmeta">'
+                    f'<span class="pill pos-{r.position}" style="font-size:10px;">'
+                    f'{r.position}</span> <b style="color:var(--good);">{r.name}</b> '
+                    f'· board #{recs.index(r)+1}'
+                    + (f" · {int(r.survival*100)}% survives"
+                       if r.survival is not None else "") + '</div>',
+                    unsafe_allow_html=True)
+            st.caption("So you can grab a player who WON'T last now, and count on "
+                       "these being there when you're back up.")
+
+
+def _render_recent_picks(limit=10):
+    if not ss.pick_log:
+        return
+    st.markdown("#### Recent picks")
+    for ov, nm, pos, slot in reversed(ss.pick_log[-limit:]):
+        mine = (slot == int(ss.get("_disp_slot", -1)))
+        tag = "🟢 you" if nm in {n for n, _ in ss.my_roster} else f"slot {slot}"
+        st.markdown(
+            f'<div class="rowline pmeta">#{ov} · <span class="pill pos-{pos}" '
+            f'style="font-size:10px;">{pos}</span> {nm} · {tag}</div>',
+            unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- sidebar
+st.sidebar.title("🎸 SHREDDER")
+
+mode = st.sidebar.radio("How are you drafting?",
+                        ["Mock", "Manual", "ESPN"],
+                        index=["Mock", "Manual", "ESPN"].index(ss.mode),
+                        help="Mock = practice vs bots · Manual = you enter every "
+                             "pick · ESPN = sync live from your league.")
+ss.mode = mode
+
+st.sidebar.markdown("### League")
+scoring_label = st.sidebar.selectbox("Scoring", list(SCORING_LABELS.keys()), index=1)
+scoring_key = SCORING_LABELS[scoring_label]
+teams = st.sidebar.number_input("Teams", 4, 16, 12)
+slot = st.sidebar.number_input("Your draft slot", 1, int(teams), 6)
+rounds = st.sidebar.number_input("Rounds", 8, 25, 16)
+
+with st.sidebar.expander("Starting lineup", expanded=False):
+    c1, c2 = st.columns(2)
+    qb = c1.number_input("QB", 0, 3, 1)
+    rb = c2.number_input("RB", 0, 5, 2)
+    wr = c1.number_input("WR", 0, 5, 2)
+    te = c2.number_input("TE", 0, 3, 1)
+    flex = c1.number_input("FLEX", 0, 3, 1)
+    dst = c2.number_input("D/ST", 0, 2, 1)
+    k = c1.number_input("K", 0, 2, 1)
+    bench = c2.number_input("Bench", 0, 12, 7)
+
+prefer_floor = st.sidebar.toggle("Prioritize weekly floor (consistency)", value=False)
+ss.copilot_voice = st.sidebar.toggle(
+    "🎸 Shredder voice", value=ss.get("copilot_voice", True),
+    help="Trash talk, position-run alarms, villain narration, and your squad's "
+         "earned nickname. Turn off for a quiet board.")
+
+starters = {"QB": qb, "RB": rb, "WR": wr, "TE": te, "FLEX": flex, "DST": dst, "K": k}
+cfg = E.LeagueConfig(
+    teams=int(teams), draft_slot=int(slot), rounds=int(rounds),
+    scoring=E.Scoring.preset(scoring_key),
+    starters={p: int(v) for p, v in starters.items() if v}, bench=int(bench),
+)
+
+# opponents model (used for survival odds + mock bots); rebuilt if size changes
+_opp = ss.get("opponents")
+if _opp is None or _opp.teams != int(teams) or _opp.my_slot != int(slot):
+    ss.opponents = O.LeagueOpponents.default(int(teams), int(slot))
+opps = ss.opponents
+# Apply any learned manager DNA to the seats EVERY run (rebuilds reset profiles),
+# and get the loyalty map so prophecy predicts the actual player each seat covets.
+# This is what makes "who's left for me" account for how opponents really draft.
+loyalty_by_slot = _apply_dna_to_opponents(opps)
+
+st.sidebar.markdown("---")
+
+# ---- mode-specific setup ----
+if mode == "Mock":
+    if st.sidebar.button("🎬 Start / restart mock", use_container_width=True,
+                         type="primary"):
+        _start_mock(cfg, opps)
+        st.rerun()
+    if ss.mock_on:
+        st.sidebar.caption(f"Mock running · overall pick {ss.current_overall} · "
+                           f"your roster: {len(ss.my_roster)}")
+    # Practice against specific archetypes: hand-tag any seat's tendency so the
+    # bots (and the crystal ball) behave like that manager type.
+    with st.sidebar.expander("🧬 Set opponent tendencies (practice)"):
+        st.caption("Tag any seat so the bots draft like that archetype — great "
+                   "for rehearsing against a known leaguemate's style.")
+        _TEND = ["ADP-robot", "RB-heavy", "WR-zealot", "zero-RB", "hero-RB",
+                 "QB-early", "TE-premium"]
+        _tag_slot = st.selectbox("Seat", [s for s in range(1, int(teams) + 1)
+                                          if s != int(slot)], key="mock_tag_slot")
+        _cur = (opps.profiles[_tag_slot].tendencies
+                if _tag_slot in opps.profiles else ["ADP-robot"])
+        _tags = st.multiselect("Tendencies", _TEND,
+                               default=[t for t in _cur if t in _TEND],
+                               key="mock_tag_tags")
+        _averse = st.checkbox("Rookie-averse", key="mock_tag_rookie")
+        if st.button("Apply to seat", key="mock_tag_apply"):
+            prof = opps.profiles.get(int(_tag_slot))
+            if prof is not None:
+                prof.tendencies = _tags or ["ADP-robot"]
+                prof.rookie_averse = bool(_averse)
+                ss.setdefault("_manual_tendencies", {})[int(_tag_slot)] = {
+                    "tendencies": prof.tendencies, "rookie_averse": prof.rookie_averse}
+                st.success(f"Seat {_tag_slot} → {', '.join(prof.tendencies)}")
+        if ss.get("_manual_tendencies"):
+            st.caption("Tagged seats: " + " · ".join(
+                f"{s}:{','.join(v['tendencies'])}"
+                for s, v in ss["_manual_tendencies"].items()))
+
+elif mode == "Manual":
+    if st.sidebar.button("🔄 Reset board", use_container_width=True):
+        _reset_board()
+        st.rerun()
+    st.sidebar.caption("You enter every pick. Use the search box up top to mark "
+                       "players gone; use the board buttons to draft your own.")
+
+elif mode == "ESPN":
+    if EC is None:
+        st.sidebar.error("ESPN client unavailable (install `requests`).")
+    else:
+        have_ck = bool(ss.espn_s2 and ss.espn_swid)
+        if not have_ck and ELOGIN is not None:
+            if st.sidebar.button("🔐 Log in to ESPN", use_container_width=True):
+                with st.spinner("Opening ESPN login window…"):
+                    r = ELOGIN.login()
+                if r.get("espn_s2") and r.get("swid"):
+                    ss.espn_s2, ss.espn_swid = r["espn_s2"], r["swid"]
+                    if SEC:
+                        SEC.save_file(r["espn_s2"], r["swid"])
+                    st.rerun()
+                else:
+                    st.sidebar.error("Login didn't complete.")
+        with st.sidebar.expander("Cookies (advanced)", expanded=not have_ck):
+            s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2)
+            swid = st.text_input("SWID", type="password", value=ss.espn_swid)
+            if st.button("Save cookies"):
+                ss.espn_s2, ss.espn_swid = s2, swid
+                if SEC:
+                    SEC.save_file(s2, swid)
+                st.rerun()
+
+        # ---- auto-discover: on draft day, just log in and pick your league ----
+        _saved = SL.load() if SL else []
+        if have_ck and st.sidebar.button("🔎 Find my leagues",
+                                         use_container_width=True):
+            with st.spinner("Asking ESPN for your leagues…"):
+                res = EC.discover_leagues(ss.espn_s2, ss.espn_swid)
+            if res.get("ok") and res.get("leagues"):
+                if SL:
+                    SL.bulk_upsert(res["leagues"])
+                ss.espn_status = res["message"]
+                st.rerun()
+            else:
+                st.sidebar.error(res.get("message", "Discovery failed."))
+
+        league_id, season = "", 2026
+        if _saved:
+            _opts = ["— pick a league —"] + [
+                (e.get("league_name") or e.get("label") or f"League {e['league_id']}")
+                + f" · {e.get('season', 2026)}" for e in _saved]
+            _sel = st.sidebar.selectbox("Your leagues", _opts, key="espn_pick")
+            if _sel != _opts[0]:
+                _e = _saved[_opts.index(_sel) - 1]
+                league_id = str(_e["league_id"])
+                season = int(_e.get("season", 2026))
+                if _e.get("my_team_name"):
+                    st.sidebar.caption(f"🏈 Your team: **{_e['my_team_name']}**")
+        # manual fallback (or when nothing discovered yet)
+        if not str(league_id).strip().isdigit():
+            league_id = st.sidebar.text_input("…or ESPN league ID", key="espn_lid")
+            season = st.sidebar.number_input("Season", 2020, 2030, 2026)
+        ss.dna_seasons = st.sidebar.text_input(
+            "🧬 Learn opponent DNA from seasons", value=ss.get("dna_seasons", ""),
+            help="Past seasons of THIS league. Shredder learns how each manager "
+                 "drafts (RB-heavy, WR-zealot, QB-early, their loyalty picks) and "
+                 "uses it to predict who they'll take — so it knows who survives "
+                 "to your pick. Blank = skip.")
+        if st.sidebar.button("⚡ Connect", type="primary", use_container_width=True):
+            if not str(league_id).strip().isdigit():
+                ss.espn_status = "Enter a numeric league ID first."
+            else:
+                try:
+                    cli = EC.EspnClient(int(league_id), int(season),
+                                        ss.espn_s2, ss.espn_swid)
+                    ok, msg = cli.verify()
+                    ss.espn = cli if ok else None
+                    ss.espn_status = msg
+                    if ok:
+                        _sync_espn(cfg, force=True)
+                        with st.spinner("Learning opponent draft DNA…"):
+                            _learn_dna(league_id, season, ss.dna_seasons)
+                except Exception as ex:  # noqa: BLE001
+                    ss.espn = None
+                    ss.espn_status = f"Connect failed: {ex}"
+        if ss.espn_status:
+            (st.sidebar.success if ss.espn else st.sidebar.error)(ss.espn_status)
+        if ss.get("_dna_note"):
+            st.sidebar.caption(ss._dna_note)
+        # re-learn button (e.g. after the draft order is set)
+        if ss.espn and st.sidebar.button("🧬 Re-learn opponent DNA",
+                                         use_container_width=True):
+            with st.spinner("Learning opponent draft DNA…"):
+                _learn_dna(league_id, season, ss.dna_seasons)
+            st.rerun()
+
+# undo is always available
+st.sidebar.markdown("---")
+if st.sidebar.button("↩️ Undo last pick", use_container_width=True):
+    if _undo():
+        st.toast("Reverted the last pick.")
+        st.rerun()
+
+
+# --------------------------------------------------------------------------- gate
+_ready = (mode == "Manual") or (mode == "Mock" and ss.mock_on) \
+    or (mode == "ESPN" and ss.espn is not None)
+if not _ready:
+    if mode == "Mock":
+        st.info("Hit **Start / restart mock** in the sidebar to practice against "
+                "AI bots that draft between your turns.")
+    elif mode == "ESPN":
+        st.info("Connect your ESPN league in the sidebar to sync live picks. "
+                "No league handy? Switch to **Mock** or **Manual**.")
+    st.subheader("How it works")
+    st.markdown(
+        "- The **hero card** shows the single best pick for *your* roster right now.\n"
+        "- Someone else drafts a guy? Type his name in the **search box** and hit "
+        "**Gone** — the next-best pick updates instantly.\n"
+        "- Draft your own pick with the green **Draft** button; your lineup fills in "
+        "on the right.\n"
+        "- Suggestions respect your roster: once a starting slot is filled, it stops "
+        "pushing that position.")
+    st.stop()
+
+
+# --------------------------------------------------------------------------- board data
+# The roster the engine sees = my_roster merged with anything recorded to my slot
+# (so ESPN sync / mock picks under my seat are never missed by the need logic).
+_mine = list(ss.my_roster)
+_seen = {n for n, _ in _mine}
+_my_slot_players = ss.team_rosters.get(int(slot), [])
+for _nm in _my_slot_players:
+    if _nm not in _seen:
+        _raw = name_to_raw.get(_nm)
+        if _raw:
+            _mine.append((_nm, _raw.position)); _seen.add(_nm)
+roster = X.Roster(players=_mine)
+rstate = X.roster_state(roster, cfg)
+
+recs = X.recommend(pool, cfg, roster, set(ss.drafted),
+                   current_overall=int(ss.current_overall),
+                   scoring_key=scoring_key, top_n=60, opponents=opps,
+                   prefer_floor=prefer_floor)
+
+# whose turn / timing
+ov = int(ss.current_overall)
+on_clock_slot = O._snake_slot(ov, int(teams))
+is_my_turn = (on_clock_slot == int(slot))
+my_picks = cfg.my_overall_picks()
+next_pick = next((p for p in my_picks if p >= ov), None)
+picks_until = (next_pick - ov) if next_pick else 0
+rnd_now = (ov - 1) // int(teams) + 1
 
 
 # --------------------------------------------------------------------------- header
-import base64 as _b64
-_icon_uri = ""
-_icon128 = _os.path.join(_os.path.dirname(__file__), "assets", "shredder_icon_128.png")
-if _os.path.exists(_icon128):
-    with open(_icon128, "rb") as _f:
-        _icon_uri = "data:image/png;base64," + _b64.b64encode(_f.read()).decode()
-_hero_icon = (f'<img src="{_icon_uri}" width="54" height="54" '
-              f'style="border-radius:8px;margin-right:14px;vertical-align:middle;'
-              f'border:1px solid var(--line);">' if _icon_uri else "")
-st.markdown(
-    '<div class="hero" style="display:flex;align-items:center;">'
-    f'{_hero_icon}'
-    '<div><h1 style="margin:0;">PROJECT SHREDDER</h1>'
-    '<div class="sub">// live-draft copilot · VORP + edge engine · opponent DNA · '
-    'prophecy · draft with soul — shred the board</div></div></div>',
-    unsafe_allow_html=True)
-picks = cfg.my_overall_picks()
-gaps = cfg.gaps_between_my_picks()
-next_pick = next((p for p in picks if p >= ss.current_overall), None)
-picks_until = (next_pick - ss.current_overall) if next_pick else 0
+st.caption(f"🏈 {scoring_label} · {teams}-team · your slot {slot}")
 
-hcols = st.columns(4)
-hcols[0].metric("On the clock (overall)", ss.current_overall)
-hcols[1].metric("Your next pick", next_pick if next_pick else "—",
-                f"in {picks_until}" if picks_until else "NOW")
-hcols[2].metric("Scoring", scoring_label.split()[0])
-hcols[3].metric("Your picks", ", ".join(map(str, picks[:6])) + "…")
+hc = st.columns([1, 1, 1, 1])
+hc[0].metric("On the clock", f"#{ov}")
+hc[1].metric("Round", rnd_now)
+hc[2].metric("Your next pick", f"#{next_pick}" if next_pick else "—",
+             "NOW" if is_my_turn else (f"in {picks_until}" if picks_until else "—"))
+hc[3].metric("Your players", len(_mine))
 
-if ss.espn:
-    scol = st.columns([1, 1, 4])
-    if scol[0].button("🔄 Sync now"):
-        _sync_espn()
+# top-level view switch: live draft board · full rankings cheat sheet · weekly start/sit
+_view = st.radio("View",
+                 ["🎯 Draft board", "📋 Rankings guide", "📅 Weekly lineup"],
+                 horizontal=True, label_visibility="collapsed", key="top_view")
+
+if mode == "ESPN" and ss.espn:
+    sc = st.columns([1, 1, 4])
+    if sc[0].button("🔄 Sync now"):
+        _sync_espn(cfg, force=True)
         st.rerun()
-    auto = scol[1].toggle("Auto-poll (4s)", value=ss.get("espn_auto", False))
-    ss.espn_auto = auto
-    if ss.get("espn_sync_note"):
-        scol[2].caption(ss.espn_sync_note)
+    auto = sc[1].toggle("Auto-sync", value=False)
+    if ss.get("sync_note"):
+        sc[2].caption(ss.sync_note)
     if auto:
-        _sync_espn()
-        try:
-            from streamlit.runtime.scriptrunner import add_script_run_ctx  # noqa
-        except Exception:
-            pass
-        st.caption("⏱️ Auto-polling ESPN every ~4s — board updates itself.")
+        _sync_espn(cfg)
         import time as _t
         _t.sleep(4)
         st.rerun()
 
 
-tab_board, tab_stack, tab_opp, tab_proph, tab_roster, tab_sim, tab_week, tab_waiver, tab_rank, tab_ledger, tab_live, tab_value, tab_lab, tab_picks = st.tabs(
-    ["🎯 Board", "🔗 Stack Lab", "🕵️ Opponents", "🔮 Prophecy", "🧢 My Roster",
-     "🧪 Strategy Sim", "📅 Weekly Lineup", "📡 Waiver Wire", "📊 Rankings",
-     "📒 Shadow Ledger", "🎲 Live & Lines", "📈 Value History", "🧬 Roster Lab", "✍️ Enter Picks"])
+# =========================================================================== RANKINGS GUIDE
+def _render_rankings():
+    """A full best-to-worst cheat sheet for the whole player pool. Ranks are
+    STABLE (neutral value, not roster-context) so it reads like a reference
+    board; drafted players get crossed off dynamically as picks come in."""
+    st.markdown("#### 📋 Full rankings guide")
+    st.caption("Every player, best to worst, by Shredder's value composite vs "
+               "consensus ADP. Drafted players are crossed off automatically. "
+               "This is a neutral reference board — the Draft board tab is the one "
+               "that factors in YOUR roster needs.")
 
-# build/refresh opponents to match current league size + slot (keep tendencies)
-def _ensure_opponents():
-    opp = ss.opponents
-    if (opp is None or opp.teams != int(teams) or opp.my_slot != int(slot)):
-        new = O.LeagueOpponents.default(int(teams), int(slot))
-        if opp is not None:  # carry over any tendencies already set
-            for s_, prof in opp.profiles.items():
-                if s_ in new.profiles:
-                    new.profiles[s_].tendencies = prof.tendencies
-                    new.profiles[s_].rookie_averse = prof.rookie_averse
-                    new.profiles[s_].favorite_team = prof.favorite_team
-        ss.opponents = new
-    return ss.opponents
-
-
-opps = _ensure_opponents()
-
-# apply learned manager DNA (real tendencies) to opponent profiles by seat
-_mgr_dna = ss.get("_mgr_dna") or {}
-_s2o = ss.get("_slot_to_owner") or {}
-if _mgr_dna and _s2o:
     try:
-        LH.apply_manager_dna(opps, _mgr_dna, _s2o)
-    except Exception:  # noqa: BLE001
-        pass
-
-# stamp real ESPN team+owner names onto opponent profiles (replaces 'slot N')
-_slot_labels = ss.get("_slot_labels") or {}
-if _slot_labels:
-    for _s, _info in _slot_labels.items():
-        _prof = opps.profiles.get(int(_s))
-        if _prof is not None and _info.get("label"):
-            _prof.name = _info["label"]
-
-# deferred mock-draft actions (set as intents in the sidebar; run here where
-# pool + opps exist)
-_ma = ss.pop("_mock_action", None)
-if _ma == "restart":
-    ss.drafted = set(); ss.my_roster = []; ss.team_rosters = {}
-    ss.pick_log = []; ss.undo_stack = []; ss.regret = []
-    ss.current_overall = 1; ss["_mock_on"] = True
-    _r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
-                                 int(ss.current_overall), opponents=opps,
-                                 pick_log=ss.pick_log)
-    ss.current_overall = _r["now_overall"]
-    st.rerun()
-elif _ma == "advance":
-    _r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
-                                 int(ss.current_overall), opponents=opps,
-                                 pick_log=ss.pick_log)
-    ss.current_overall = _r["now_overall"]
-    st.rerun()
-elif _ma == "restart_with_dna":
-    # 1) learn each manager's DNA from real past drafts into opps profiles
-    try:
-        _lid = ss.get("_mock_league_resolved") or ss.get("mock_league", "")
-        if not str(_lid).strip().isdigit():
-            ss["_mock_dna_note"] = ("Pick a saved league (or type a numeric "
-                                    "League ID) first, then start the mock.")
-            raise ValueError("skip")
-        _seas = [int(x) for x in ss.get("mock_seasons", "2021,2022,2023,2024,2025").split(",")
-                 if x.strip()]
-        _drafts = LH.pull_past_drafts(int(_lid), _seas,
-                                      ss.get("espn_s2", ""), ss.get("espn_swid", ""))
-        if _drafts:
-            _mgr = LH.learn_dna_by_manager(_drafts)
-            ss["_draft_hist"] = LH.player_draft_history(_drafts)
-            _so = LH.current_slot_to_owner(int(_lid), 2026,
-                                           ss.get("espn_s2", ""), ss.get("espn_swid", ""))
-            if _so:
-                LH.apply_manager_dna(opps, _mgr, _so)
-            else:
-                LH.apply_dna(opps, LH.learn_dna(_drafts))
-            ss["_dna"] = {m: d["dossier"] for m, d in _mgr.items()}
-            ss["_mock_dna_note"] = (f"Loaded {len(_mgr)} real managers' DNA into "
-                                    f"the mock bots.")
-        else:
-            ss["_mock_dna_note"] = ("No history found — mock uses default bot "
-                                    "tendencies (set styles in Opponents tab).")
+        rows = _rankings_cache(scoring_key)
     except Exception as ex:  # noqa: BLE001
-        if str(ex) != "skip":
-            ss["_mock_dna_note"] = f"DNA load failed ({ex}); using default bots."
-    # 2) start the mock against those opponents — only if the ID was valid
-    if str(ss.get("_mock_league_resolved") or ss.get("mock_league", "")).strip().isdigit():
-        ss.drafted = set(); ss.my_roster = []; ss.team_rosters = {}
-        ss.pick_log = []; ss.undo_stack = []; ss.regret = []
-        ss.current_overall = 1; ss["_mock_on"] = True
-        _r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
-                                     int(ss.current_overall), opponents=opps,
-                                     pick_log=ss.pick_log)
-        ss.current_overall = _r["now_overall"]
+        st.error(f"Couldn't build rankings: {ex}")
+        return
+
+    drafted = set(ss.drafted)
+    mine = {n for n, _ in _mine}
+    total = len(rows)
+    remaining = sum(1 for r in rows if r.name not in drafted)
+
+    fc = st.columns([2, 2, 2, 2])
+    pos_filter = fc[0].multiselect("Position", ["QB", "RB", "WR", "TE", "K", "DST"],
+                                   placeholder="All", label_visibility="collapsed")
+    hide_drafted = fc[1].toggle("Hide drafted", value=False)
+    only_value = fc[2].toggle("Value picks only", value=False,
+                              help="Show only players Shredder ranks well ahead "
+                                   "of their ADP.")
+    fc[3].metric("On the board", f"{remaining}/{total}")
+
+    view = rows
+    if pos_filter:
+        view = [r for r in view if r.position in pos_filter]
+    if only_value:
+        view = [r for r in view if r.verdict == "VALUE"]
+    if hide_drafted:
+        view = [r for r in view if r.name not in drafted]
+
+    st.markdown(
+        '<div class="rankhdr">'
+        '<span style="width:44px;">#</span>'
+        '<span style="width:64px;">POS</span>'
+        '<span style="flex:1;">PLAYER</span>'
+        '<span style="width:52px;">TIER</span>'
+        '<span style="width:70px;">ADP</span>'
+        '<span style="width:110px;">VS MARKET</span>'
+        '<span style="width:120px;">ACTION</span></div>',
+        unsafe_allow_html=True)
+
+    # cap the rendered rows for performance; filters narrow it as needed
+    LIMIT = 180
+    shown = view[:LIMIT]
+    for r in shown:
+        gone = r.name in drafted
+        is_mine = r.name in mine
+        vcls = {"VALUE": "vr-value", "REACH": "vr-reach"}.get(r.verdict, "vr-fair")
+        vtxt = (f'{r.verdict} {"+" if (r.delta or 0) >= 0 else ""}{r.delta}'
+                if r.delta is not None else "—")
+        namestyle = ("text-decoration:line-through;color:var(--dim);opacity:.55;"
+                     if gone else "color:var(--txt);")
+        mine_tag = ('<span class="mine-tag">YOURS</span>' if is_mine
+                    else ('<span class="gone-tag">DRAFTED</span>' if gone else ""))
+        rowbg = "background:rgba(51,214,159,.06);" if is_mine else ""
+        c = st.columns([0.5, 0.7, 4.2, 0.6, 0.9, 1.3, 1.4])
+        c[0].markdown(f'<div class="rk" style="{rowbg}">{r.shredder_rank}</div>',
+                      unsafe_allow_html=True)
+        c[1].markdown(f'<span class="pill pos-{r.position}">{r.position}{r.pos_rank}</span>',
+                      unsafe_allow_html=True)
+        c[2].markdown(
+            f'<div style="{rowbg}"><span class="pname" style="{namestyle}">{r.name}</span> '
+            f'<span class="pmeta">{r.team}</span> {mine_tag}</div>',
+            unsafe_allow_html=True)
+        c[3].markdown(f'<span class="pmeta">T{r.tier}</span>', unsafe_allow_html=True)
+        c[4].markdown(f'<span class="pmeta">{r.consensus_adp if r.consensus_adp else "—"}</span>',
+                      unsafe_allow_html=True)
+        c[5].markdown(f'<span class="vr {vcls}">{vtxt}</span>', unsafe_allow_html=True)
+        if gone:
+            if c[6].button("↩ Undo", key=f"rk_undo_{r.name}",
+                           use_container_width=True,
+                           help="Put this player back on the board"):
+                _restore_player(r.name)
+                st.rerun()
+        else:
+            bc = c[6].columns(2)
+            if bc[0].button("Mine", key=f"rk_mine_{r.name}",
+                            use_container_width=True):
+                _record_pick(cfg, r.name, r.position, mine=True, opps=opps)
+                st.rerun()
+            if bc[1].button("Gone", key=f"rk_gone_{r.name}",
+                            use_container_width=True):
+                _mark_gone(cfg, r.name, opps)
+                st.rerun()
+    if len(view) > LIMIT:
+        st.caption(f"Showing top {LIMIT} of {len(view)} — filter by position to "
+                   "see deeper into the pool.")
+
+
+def _render_weekly_lineup():
+    """Start/sit for the week: the optimal lineup from YOUR roster plus a plain-
+    English reason to start or bench each player (matchup, bye, dome, role)."""
+    st.markdown("#### 📅 Weekly lineup — who to start")
+    st.caption("Builds your best legal starting lineup for a given week and "
+               "explains every start/sit call. Uses the players on your team.")
+
+    if not _mine:
+        st.info("You haven't drafted anyone yet. Draft your team on the "
+                "**🎯 Draft board**, then come here to set your weekly lineup.")
+        return
+
+    wk = st.number_input("NFL week", 1, 18, 1)
+    try:
+        rows = LO.optimize_week(_mine, pool, cfg, int(wk), scoring_key)
+    except Exception as ex:  # noqa: BLE001
+        st.error(f"Couldn't build the lineup: {ex}")
+        return
+
+    starters_rows = [s for s in rows if s.started]
+    bench_rows = [s for s in rows if not s.started]
+    proj_total = round(sum(s.weekly_points for s in starters_rows), 1)
+
+    mc = st.columns([1, 1, 2])
+    mc[0].metric("Projected starters", proj_total)
+    mc[1].metric("On bye", sum(1 for s in rows if "ON BYE" in s.narrative))
+
+    def _row(s, dim=False):
+        style = "opacity:.55;" if dim else ""
+        slotchip = (f'<span class="pill pos-{s.position}">{s.slot}</span>'
+                    if s.started else '<span class="gone-tag">BENCH</span>')
+        reason = s.narrative.split("): ", 1)[-1]
+        st.markdown(
+            f'<div class="rowline" style="{style}">{slotchip} '
+            f'<span class="pname" style="font-size:14px;">{s.name}</span> '
+            f'<span class="pmeta">{s.team} · {s.weekly_points} pts</span><br>'
+            f'<span class="pmeta">{reason}</span></div>', unsafe_allow_html=True)
+
+    st.markdown("##### ✅ Start")
+    for s in starters_rows:
+        _row(s)
+    if bench_rows:
+        st.markdown("##### 🪑 Bench")
+        for s in bench_rows:
+            _row(s, dim=True)
+
+
+if _view == "📋 Rankings guide":
+    _render_rankings()
+    st.stop()
+
+if _view == "📅 Weekly lineup":
+    _render_weekly_lineup()
+    st.stop()
+
+
+# on-the-clock banner
+if is_my_turn:
+    st.success(f"⏱ **You're on the clock** — overall #{ov}, round {rnd_now}. "
+               "Draft your pick below.")
+else:
+    who = (opps.profiles[on_clock_slot].name
+           if on_clock_slot in opps.profiles and opps.profiles[on_clock_slot].name
+           else f"Team in slot {on_clock_slot}")
+    st.info(f"🕒 On the clock: **{who}** (overall #{ov}). Your next pick is "
+            f"#{next_pick} — {picks_until} away. Mark picks as they happen below.")
+
+# DNA readiness pill — so you KNOW whether the snipe/prophecy engine is live
+if mode == "ESPN":
+    _dna_ready = bool(ss.get("_mgr_dna")) and bool(ss.get("_slot_to_owner"))
+    _n_seats = len(ss.get("_slot_to_owner") or {})
+    if _dna_ready:
+        st.success(f"🧬 Opponent DNA active — {_n_seats} rival seats mapped. "
+                   "Snipes and survival odds are reading how each manager drafts.")
+    elif ss.get("_mgr_dna"):
+        st.warning("🧬 DNA learned but NOT mapped to seats yet — ESPN hasn't "
+                   "posted this year's draft order. Hit **🧬 Re-learn opponent "
+                   "DNA** in the sidebar once the order is set (usually right "
+                   "before the draft) to activate snipes.")
+
+# 🔮 crystal ball: predict rivals' picks + who survives to you (DNA-powered)
+_render_rivals_forecast(cfg, opps, loyalty_by_slot)
+
+
+# --------------------------------------------------------------------------- someone got drafted
+st.markdown("#### Someone just got picked?")
+sg = st.columns([4, 1, 1])
+available_names = [p.name for p in pool if p.name not in ss.drafted]
+picked = sg[0].selectbox(
+    "Search the player another team drafted", ["—"] + available_names,
+    label_visibility="collapsed",
+    help="Type to filter. Mark them gone and your next-best pick updates instantly.")
+if sg[1].button("✗ Gone (other team)", use_container_width=True,
+                disabled=(picked == "—")):
+    _mark_gone(cfg, picked, opps)
+    st.rerun()
+if sg[2].button("✓ I drafted them", use_container_width=True,
+                disabled=(picked == "—")):
+    raw = name_to_raw.get(picked)
+    _record_pick(cfg, picked, raw.position if raw else "?", mine=True, opps=opps)
     st.rerun()
 
+st.divider()
 
-# --------------------------------------------------------------------------- board
-def _render_board():
-    # Build the roster the engine sees from the MOST COMPLETE source. Picks can
-    # land via _record_pick (my_roster) OR the ESPN sync / mock (team_rosters
-    # under my slot). If sync recorded my pick to team_rosters but slot-matching
-    # missed my_roster, the surplus penalty would see an empty roster and wrongly
-    # recommend a position I've already filled (the '3rd TE' bug). Merge both,
-    # deduped, so the engine always knows my true roster.
-    _mine = list(ss.my_roster)
-    _seen = {n for n, _ in _mine}
-    _my_slot_int = int(slot) if str(slot).isdigit() else None
-    _tr = ss.team_rosters.get(_my_slot_int, []) if _my_slot_int else []
-    _name_pos = {r.name: r.position for r in pool}
-    for _nm in _tr:
-        if _nm not in _seen:
-            _pos = _name_pos.get(_nm)
-            if _pos:
-                _mine.append((_nm, _pos)); _seen.add(_nm)
-    roster = X.Roster(players=_mine)
-    recs = X.recommend(pool, cfg, roster, set(ss.drafted),
-                       current_overall=int(ss.current_overall),
-                       scoring_key=scoring_key, top_n=40, opponents=opps,
-                       prefer_floor=prefer_floor)
-    # stash the top rec so _record_pick can log Shredder's shadow pick
+
+# --------------------------------------------------------------------------- main split
+left, right = st.columns([2.3, 1])
+
+with left:
+    # ---- hero: the one best pick for MY roster ----
     if recs:
-        _b = recs[0]
-        ss["_top_rec"] = {"name": _b.name, "position": _b.position,
-                          "adp": _b.adp, "badges": list(_b.badges)}
-    else:
-        ss["_top_rec"] = None
-
-    # tier-cliff alarm banner — only when a NEEDED position is about to cliff
-    try:
-        _bcliffs = [c for c in RLAB.tier_cliff(pool, set(ss.drafted),
-                    list(ss.my_roster), scoring_key) if c.urgency == "now"]
-    except Exception:
-        _bcliffs = []
-    if _bcliffs:
-        st.error("🚨 CLIFF: " + " · ".join(
-            f"{c.position} ({c.remaining_tier} left, need {c.need})" for c in _bcliffs)
-            + " — draft this position before it falls off.")
-
-    # ======================= WHOSE TURN IS IT? — dual-view switch =======================
-    _ov = int(ss.current_overall)
-    _on_clock_slot = O._snake_slot(_ov, int(teams))
-    _my_slot = int(slot)
-    _is_my_turn = (_on_clock_slot == _my_slot)
-    # how many picks until my next turn?
-    _picks_until_me = 0
-    if not _is_my_turn:
-        _scan = _ov
-        while O._snake_slot(_scan, int(teams)) != _my_slot and _scan < _ov + int(teams) * 2:
-            _scan += 1
-        _picks_until_me = _scan - _ov
-    _on_clock_name = (opps.profiles[_on_clock_slot].name
-                      if (opps and _on_clock_slot in opps.profiles
-                          and opps.profiles[_on_clock_slot].name) else None)
-    _rnd_now = (_ov - 1) // int(teams) + 1
-
-    # view mode: Auto follows whose turn it is; user can pin either view
-    _view_choice = st.radio(
-        "View", ["🤖 Auto", "🎯 My Pick", "🕵️ Opponent Watch"],
-        horizontal=True, label_visibility="collapsed", key="board_view")
-    if _view_choice == "🎯 My Pick":
-        _my_pick_view = True
-    elif _view_choice == "🕵️ Opponent Watch":
-        _my_pick_view = False
-    else:  # Auto
-        _my_pick_view = _is_my_turn
-
-    # the on-the-clock banner — always visible so you never lose the thread
-    if _is_my_turn:
-        st.markdown(
-            f'<div style="background:linear-gradient(100deg,#141410,#1a1a0f);'
-            f'border:1px solid var(--accent);border-left:3px solid var(--accent);'
-            f'border-radius:6px;padding:10px 16px;margin-bottom:10px;">'
-            f'<span style="font:700 13px \'Space Grotesk\',sans-serif;'
-            f'text-transform:uppercase;letter-spacing:.6px;color:var(--accent);">'
-            f'⏱ YOU\'RE ON THE CLOCK</span> '
-            f'<span class="pmeta">· overall {_ov} · round {_rnd_now} · '
-            f'slot {_my_slot}</span></div>',
-            unsafe_allow_html=True)
-    else:
-        _who = _on_clock_name or f"slot {_on_clock_slot}"
-        st.markdown(
-            f'<div style="background:var(--panel);border:1px solid var(--line);'
-            f'border-left:3px solid var(--accent2);border-radius:6px;'
-            f'padding:10px 16px;margin-bottom:10px;">'
-            f'<span style="font:700 13px \'Space Grotesk\',sans-serif;'
-            f'text-transform:uppercase;letter-spacing:.6px;color:var(--accent2);">'
-            f'🕵️ ON THE CLOCK: {_who}</span> '
-            f'<span class="pmeta">· overall {_ov} · your next pick in '
-            f'{_picks_until_me} pick{"s" if _picks_until_me != 1 else ""}</span></div>',
-            unsafe_allow_html=True)
-
-    if _my_pick_view:
-        _render_my_pick_view(pool, cfg, recs, opps, scoring_key, prefer_floor,
-                             slot, teams)
-    else:
-        _render_opponent_view(pool, cfg, recs, opps, scoring_key, slot, teams,
-                              _on_clock_slot, _on_clock_name, _picks_until_me)
-
-
-def _render_my_pick_view(pool, cfg, recs, opps, scoring_key, prefer_floor,
-                         slot, teams):
-    # ============================ COPILOT COMMAND CENTER ============================
-    if ss.get("_mock_on") and ss.get("_mock_dna_note"):
-        st.info("🧬 " + ss["_mock_dna_note"])
-    if recs:
-        # Best pick right now — the hero
         best = recs[0]
+        need_line = _need_summary(rstate)
         st.markdown(
-            f'<div style="background:linear-gradient(100deg,#0d2a2e,#12203a);'
-            f'border:1px solid #22d3ee;border-radius:16px;padding:16px 20px;'
-            f'margin-bottom:10px;box-shadow:0 0 26px rgba(34,211,238,.22);">'
-            f'<span style="font:800 13px Inter;color:#22d3ee;letter-spacing:1px;">'
-            f'⚡ TAKE NOW</span><br>'
-            f'<span style="font:800 24px Inter;color:#e8eef7;">{best.name}</span> '
+            f'<div class="hero"><span class="tag">⚡ BEST PICK FOR YOUR ROSTER</span>'
+            f'<div class="nm">{best.name} '
             f'<span class="pill pos-{best.position}">{best.position}</span> '
-            f'<span class="pmeta">{best.team}</span><br>'
-            f'<span style="color:#9fe8f2;font-size:13px;">'
-            + " · ".join(best.badges[:4]) + '</span></div>',
+            f'<span class="pmeta">{best.team}</span></div>'
+            f'<div>{_badges_html(best.badges, 5)}</div>'
+            f'<div class="pmeta" style="margin-top:6px;">VORP {best.vorp} · '
+            f'tier T{best.tier} · ADP {best.adp if best.adp else "—"}'
+            f'{(" · " + str(int(best.survival*100)) + "% survives to your next pick") if best.survival is not None else ""}'
+            f'</div>'
+            f'<div class="pmeta" style="margin-top:4px;">{need_line}</div></div>',
             unsafe_allow_html=True)
-
-    # run detector + nemesis + tilt banners
-    _recent_pos = [p[2] for p in ss.pick_log]
-    _run = CO.run_detector(_recent_pos)
-    if _run:
-        st.warning(_run)
-    _pos_of = {n: (name_to_raw[n].position if n in name_to_raw else "?")
-               for lst in ss.team_rosters.values() for n in lst}
-    _nem = CO.nemesis(ss.team_rosters, int(slot), _pos_of)
-    if _nem:
-        st.info(_nem)
-    # tilt: was the last pick a reach vs ADP?
-    if ss.pick_log:
-        _lov, _lname, _lpos, _lslot = ss.pick_log[-1]
-        _lraw = name_to_raw.get(_lname)
-        _ladp = P.adp_for(_lraw, scoring_key) if _lraw else None
-        _reach = (_ladp is not None and _lov < _ladp - 10)
-        _tilt = CO.tilt(_lslot if _lslot != int(slot) else None, _reach)
-        if _tilt:
-            st.warning(_tilt)
-    # villain narration for the current round
-    _rnd = (int(ss.current_overall) - 1) // int(teams) + 1
-    _mylast = ss.my_roster[-1][0] if ss.my_roster else None
-    st.markdown(f'<div class="pmeta" style="font-style:italic;color:#a78bfa;">'
-                f'🎭 {CO.villain_line(_rnd, _mylast)}</div>', unsafe_allow_html=True)
-
-    # 🎡 WHEEL PLAY — grab-now-vs-wait across your snake turn
-    _slot_names = {s_: (opps.profiles[s_].name or f"slot {s_}")
-                   for s_ in opps.profiles}
-    _pair = WP.best_pair(pool, cfg, set(ss.drafted), int(ss.current_overall),
-                         opponents=opps, scoring_key=scoring_key)
-    if _pair and _pair.get("take_now"):
-        tn = _pair["take_now"]
-        tw = _pair.get("then_wheel")
-        wheel_txt = (f'<b style="color:#e8eef7;">TAKE NOW:</b> {tn[0]} ({tn[1]})'
-                     + (f' &nbsp;→&nbsp; <b style="color:#e8eef7;">WHEEL BACK:</b> '
-                        f'{tw[0]} ({tw[1]})' if tw else ''))
-        st.markdown(
-            f'<div style="background:linear-gradient(100deg,#20122e,#101e33);'
-            f'border:1px solid #22d3ee;border-radius:12px;padding:10px 14px;'
-            f'margin-bottom:8px;">'
-            f'<span style="font:800 12px Inter;color:#22d3ee;letter-spacing:1px;">'
-            f'🎡 WHEEL PLAY</span><br>{wheel_txt}<br>'
-            f'<span class="pmeta">{_pair["logic"]}</span></div>',
-            unsafe_allow_html=True)
-
-    # ➕ TD PACKAGE — same-team QB+RB combos projected for 40+ combined TDs
-    _combos = WP.td_combos(pool, scoring_key, min_tds=40.0)
-    _combos = [c for c in _combos
-               if c["qb"] not in ss.drafted or c["rb"] not in ss.drafted]
-    if _combos:
-        _rows = ""
-        for c in _combos[:6]:
-            _qb_gone = "✓" if c["qb"] in ss.drafted else ""
-            _rb_gone = "✓" if c["rb"] in ss.drafted else ""
-            _rows += (
-                f'<div style="margin:4px 0;">'
-                f'<span style="color:#111;background:var(--accent);font-weight:800;'
-                f'border-radius:3px;padding:0 5px;">➕</span> '
-                f'<b style="color:var(--txt);">{c["qb"]}</b>{_qb_gone} '
-                f'<span class="pmeta">+ </span>'
-                f'<b style="color:var(--txt);">{c["rb"]}</b>{_rb_gone} '
-                f'<span class="pmeta">({c["team"]}) — {c["combined"]:.0f} combined TDs '
-                f'(QB {c["qb_td"]:.0f} / RB {c["rb_td"]:.0f})</span></div>')
-        st.markdown(
-            f'<div style="background:linear-gradient(100deg,#0d1a10,#12140a);'
-            f'border:1px solid var(--accent);border-left:3px solid var(--accent);'
-            f'border-radius:6px;padding:10px 14px;margin-bottom:8px;">'
-            f'<span style="font:700 12px \'Space Grotesk\',sans-serif;'
-            f'color:var(--accent);text-transform:uppercase;letter-spacing:.5px;">'
-            f'➕ TD PACKAGE — 40+ combined-TD QB/RB stacks</span><br>{_rows}'
-            f'<span class="pmeta">Rostering both concentrates a scoring-machine '
-            f'offense — draft them as a package.</span></div>',
-            unsafe_allow_html=True)
-
-    # championship equity + ghost draft (Monte Carlo) — computed on demand
-    ecol = st.columns([1, 1, 1, 1])
-    if ecol[0].button("🎲 Run Monte Carlo", help="Simulate the rest of the draft"):
-        with st.spinner("Simulating 300 drafts…"):
-            sim = SIMU.simulate(pool, cfg, set(ss.drafted), list(ss.my_roster),
-                                int(ss.current_overall), opponents=opps, n=300)
-            ss["_sim"] = sim
-    _sim = ss.get("_sim")
-    if _sim:
-        ecol[1].metric("🏆 Title equity", f"{int(_sim.championship_equity*100)}%")
-        ecol[2].metric("Your proj", f"{_sim.your_proj_points:.0f}")
-        delta = _sim.your_proj_points - _sim.ghost_points
-        ecol[3].metric("👻 vs Ghost", f"{'+' if delta>=0 else ''}{delta:.0f}",
-                       help="You minus the pure-VORP shadow AI")
-    # undo + chaos + soul + team name
-    ucol = st.columns([1, 1, 1.2, 1.8])
-    if ucol[0].button("↩️ Undo last pick"):
-        if _undo():
-            st.toast("Reverted last pick (local only — not ESPN).")
+        bcol = st.columns(2)
+        if bcol[0].button(f"✓ Draft {best.name.split()[-1]}", type="primary",
+                          use_container_width=True, key="hero_draft"):
+            _record_pick(cfg, best.name, best.position, mine=True, opps=opps)
             st.rerun()
-    if ucol[1].button("🌀 Chaos pick") and recs:
-        _cp = CO.chaos_pick(recs)
-        if _cp:
-            st.toast(f"CHAOS: {_cp.name} — highest-ceiling swing.")
-    if ucol[2].button("🔥 Draft with Soul",
-                      help="A player the projections don't hype yet, but every "
-                           "underlying signal says will excel."):
-        ss["_soul"] = SOUL.find_soul(pool, cfg, scoring_key, set(ss.drafted))
-        if ss["_soul"] is None:
-            st.toast("No soul pick on the board right now — signals are quiet.")
-    _tn = CO.team_name([p for _, p in ss.my_roster])
-    ucol[3].markdown(f'<div class="pmeta">Your squad: '
-                     f'<b style="color:var(--accent2);">{_tn}</b></div>',
-                     unsafe_allow_html=True)
-    # ===============================================================================
-
-    _soul = ss.get("_soul")
-    if _soul and _soul.name not in set(ss.drafted):
-        _sig_chips = " ".join(
-            f'<span class="bdg bdg-stack">{s}</span>' for s in _soul.signals[:4])
-        st.markdown(
-            f'<div style="background:linear-gradient(100deg,#170d13,#1a0f16);'
-            f'border:1px solid var(--accent2);border-left:3px solid var(--accent2);'
-            f'border-radius:6px;padding:14px 18px;margin-bottom:12px;'
-            f'box-shadow:0 0 24px rgba(255,46,136,.20);">'
-            f'<span style="font:700 14px \'Space Grotesk\',sans-serif;'
-            f'text-transform:uppercase;letter-spacing:.5px;color:var(--accent2);">'
-            f'🔥 Draft with Soul</span><br>'
-            f'<span class="pname">{_soul.name}</span> '
-            f'<span class="pill pos-{_soul.position}">{_soul.position}</span> '
-            f'<span class="pmeta">{_soul.team} · ADP '
-            f'{_soul.adp if _soul.adp else "undrafted"} · soul {_soul.soul_score}</span><br>'
-            f'<div style="margin:6px 0 4px;">{_sig_chips}</div>'
-            f'<span style="color:#f5b6d0;font-size:13px;">{_soul.thesis}</span></div>',
-            unsafe_allow_html=True)
-    elif _soul and _soul.name in set(ss.drafted):
-        ss["_soul"] = None      # they got drafted — clear the stale card
-
-    _dh = DH.recommend_if_right(pool, cfg, list(ss.my_roster), set(ss.drafted),
-                                int(ss.current_overall), scoring_key)
-    if _dh:
-        st.markdown(
-            f'<div style="background:linear-gradient(100deg,#2a1836,#3a1f2e);'
-            f'border:1px solid #a78bfa;border-radius:14px;padding:14px 18px;'
-            f'margin-bottom:12px;box-shadow:0 0 24px rgba(167,139,250,.25);">'
-            f'<span style="font:800 15px Inter;color:#fcd34d;">🐴 DARK HORSE — '
-            f'the time is right.</span><br>'
-            f'<span style="font:700 18px Inter;color:#e8eef7;">{_dh.name}</span> '
-            f'<span class="pill pos-{_dh.position}">{_dh.position}</span> '
-            f'<span class="pmeta">{_dh.team} · ADP '
-            f'{_dh.adp if _dh.adp else "undrafted"} · ceiling {_dh.ceiling_score}</span><br>'
-            f'<span style="color:#c9b6f5;font-size:13px;">{_dh.thesis}</span></div>',
-            unsafe_allow_html=True)
-    if not recs:
-        st.info("No players available — load data or reset the board.")
+        if bcol[1].button("✗ Gone", use_container_width=True, key="hero_gone"):
+            _mark_gone(cfg, best.name, opps)
+            st.rerun()
+        _render_why(best, key="hero")
     else:
-        fcol1, fcol2 = st.columns([3, 1])
-        pos_filter = fcol1.multiselect("Filter position",
-                                       ["QB", "RB", "WR", "TE", "K", "DST"])
-        shown = [r for r in recs if not pos_filter or r.position in pos_filter]
-        fcol2.metric("Best available", len(shown))
-        _combo_names = WP.combo_players(pool, scoring_key, min_tds=40.0)
-        for idx, r in enumerate(shown):
-            with st.container(border=True):
-                top = " ⭐" if idx == 0 else ""
-                _plus = (' <span title="Part of a 40+ combined-TD QB/RB package" '
-                         'style="color:#111;background:var(--accent);font-weight:800;'
-                         'border-radius:3px;padding:0 4px;">➕</span>'
-                         if r.name in _combo_names else "")
-                cols = st.columns([3.2, 0.9, 0.9, 0.9, 4.2])
-                adp_txt = r.adp if r.adp else "—"
-                vva = (f'<span class="pmeta"> · vs ADP '
-                       f'{"+" if (r.value_vs_adp or 0) >= 0 else ""}'
-                       f'{r.value_vs_adp}</span>') if r.value_vs_adp is not None else ""
-                surv = (f'<span class="pmeta"> · {int(r.survival*100)}% to next</span>'
-                        if r.survival is not None else "")
-                _injcss = {"O": "inj-out", "IR": "inj-out", "PUP": "inj-out",
-                           "SUS": "inj-out", "DNR": "inj-out", "D": "inj-doubt",
-                           "Q": "inj-quest"}.get(r.injury_chip, "inj-quest")
-                inj_chip = (f'<span class="inj {_injcss}">{r.injury_chip}</span>'
-                            if r.injury_chip else "")
-                cols[0].markdown(
-                    f'<span class="pill pos-{r.position}">{r.position}</span> '
-                    f'<span class="pname">{r.name}{top}</span>{_plus}{inj_chip}<br>'
-                    f'<span class="pmeta">{r.team}{vva}{surv}</span>',
-                    unsafe_allow_html=True)
-                cols[1].metric("VORP", r.vorp)
-                cols[2].metric("Tier", f"T{r.tier}")
-                cols[3].metric("ADP", adp_txt)
-                cols[4].markdown(_badges_html(r.badges), unsafe_allow_html=True)
-                if r.injury_note:
-                    cols[4].markdown(f'<span class="pmeta">🏥 {r.injury_note}</span>',
-                                     unsafe_allow_html=True)
-                _sit = SIT.context_for(r.name, r.position, r.team)
-                if _sit["notes"]:
-                    _tdcol = {"protected": "var(--good)", "capped": "var(--warn)"}.get(
-                        _sit["td_tag"], "var(--dim)")
-                    cols[4].markdown(
-                        "".join(f'<span class="pmeta" style="color:{_tdcol};">🧭 {n}</span><br>'
-                                for n in _sit["notes"]),
-                        unsafe_allow_html=True)
-                # 🎯 DRAFT LOYALTY — who DRAFTED this player in past years (not
-                # end-of-year ownership). Powered by player_draft_history.
-                _dh = ss.get("_draft_hist") or {}
-                _hist = LH.lookup_player_history(_dh, r.name) if _dh else None
-                if _hist and _hist.get("events"):
-                    _by = _hist["by_manager"]           # {manager_name: count}
-                    _parts = []
-                    for _mgr_nm, _c in list(_by.items())[:3]:
-                        _yrs = sorted({e["season"] for e in _hist["events"]
-                                       if e["manager_name"] == _mgr_nm and e["season"]},
-                                      reverse=True)
-                        _yrtxt = ", ".join(str(y) for y in _yrs)
-                        _loyal = " 🔁" if _c >= 2 else ""
-                        _parts.append(f"{_mgr_nm} ({_yrtxt}){_loyal}")
-                    cols[4].markdown(
-                        '<span class="pmeta" style="color:#a78bfa;">🎯 Drafted by: '
-                        + "; ".join(_parts) + '</span>',
-                        unsafe_allow_html=True)
-                if r.position in ("RB", "WR", "TE", "QB") and not SIT.has_context(r.name):
-                    if cols[4].button("🔎 Deep read", key=f"deep_{r.name}",
-                                      help="Live-fetch this player's current team + latest news from ESPN"):
-                        with st.spinner(f"Reading {r.name}…"):
-                            res = SITL.deep_read(r.name, r.position, r.team)
-                        if not res["ok"]:
-                            st.toast(f"{r.name}: {res['note']}", icon="⚠️")
-                        st.rerun()
-                bcols = cols[4].columns(2)
-                if bcols[0].button("✓ Draft to my team", key=f"me_{r.name}",
-                                   use_container_width=True):
-                    _record_pick(r.name, r.position, mine=True)
-                    st.rerun()
-                if bcols[1].button("✗ Gone (someone else)", key=f"gone_{r.name}",
-                                   use_container_width=True):
-                    _record_pick(r.name, r.position, mine=False)
-                    st.rerun()
+        st.warning("No players available. Reset the board or check your data.")
 
-    # ---- reconstructing draft queue: the plan, not just the next pick ----
-    st.divider()
-    with st.expander("📋 My draft queue — pick order (rebuilds after every pick)", expanded=True):
-        st.caption("Plans your next several snake picks against the survival clock: "
-                   "take the one who won't last now, queue the one who will for later.")
-        try:
-            _q = DQ.build_queue(pool, cfg, set(ss.drafted), list(ss.my_roster),
-                                int(ss.current_overall), opponents=opps,
-                                scoring_key=scoring_key, max_slots=7)
-        except Exception as _e:
-            _q = []
-            st.caption(f"(queue unavailable: {_e})")
-        if not _q:
-            st.caption("No upcoming picks to plan.")
-        for _s in _q:
-            _surv = f"{int((_s.survival_here or 0)*100)}% here" if _s.survival_here is not None else ""
-            st.markdown(
-                f"**R{_s.round_no} · pick {_s.my_overall}** → **{_s.name}** "
-                f"({_s.position}·{_s.team})  \n"
-                f"<span class='pmeta'>{_s.reason} · {_surv}</span>",
-                unsafe_allow_html=True)
+    # ---- contextual insights: pop up only when the situation applies ----
+    try:
+        _insights = DI.gather(pool, cfg, _mine, set(ss.drafted),
+                              int(ss.current_overall), recs, opps, scoring_key,
+                              name_to_raw, loyalty_by_slot=loyalty_by_slot)
+    except Exception:  # noqa: BLE001 — insights must never block the board
+        _insights = []
+    if _insights:
+        st.markdown("#### 💡 Worth a look right now")
+        _render_insights(_insights, cfg, opps)
 
+    # ---- best available list ----
+    st.markdown("#### Best available")
+    fcol = st.columns([3, 1])
+    pos_filter = fcol[0].multiselect("Filter by position",
+                                     ["QB", "RB", "WR", "TE", "K", "DST"],
+                                     label_visibility="collapsed",
+                                     placeholder="All positions")
+    only_needs = fcol[1].toggle("Needs only", value=False,
+                                help="Show only positions that still fill a "
+                                     "starting slot.")
+    shown = recs[1:] if recs else []
+    if pos_filter:
+        shown = [r for r in shown if r.position in pos_filter]
+    if only_needs:
+        open_pos = {p for p in _POS_ORDER
+                    if p != "FLEX" and rstate["starter_open"].get(p, 0) > 0}
+        if rstate["flex_open"] > 0:
+            open_pos |= {"RB", "WR", "TE"}
+        shown = [r for r in shown if r.position in open_pos]
 
-def _render_opponent_view(pool, cfg, recs, opps, scoring_key, slot, teams,
-                          on_clock_slot, on_clock_name, picks_until_me):
-    """Between YOUR picks — read the room. Who's up, what they'll likely take,
-    who to snipe, and a slim on-deck peek at your own best-available."""
-    my_slot = int(slot)
-    # Build per-slot loyalty map: this seat's manager → players they've drafted
-    # repeatedly (their 'guys'), so Prophecy predicts the actual player, not just
-    # the position. mgr_dna carries favorite_players; slot_to_owner maps seat→mgr.
-    import re as _re
-
-    def _ln(s):
-        s = (s or "").lower().strip()
-        s = _re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
-        s = _re.sub(r"[^a-z0-9 ]", "", s)
-        return _re.sub(r"\s+", " ", s).strip()
-
-    _loyalty_by_slot = {}
-    _mgr_dna_l = ss.get("_mgr_dna") or {}
-    _s2o_l = ss.get("_slot_to_owner") or {}
-    for _sl, _owner in _s2o_l.items():
-        _d = _mgr_dna_l.get(_owner)
-        if _d and _d.get("favorite_players"):
-            _loyalty_by_slot[int(_sl)] = {_ln(nm): c
-                                          for nm, c in _d["favorite_players"].items()}
-    # Prophecy rollout over the upcoming picks
-    preds = PROPH.predict_board(pool, cfg, set(ss.drafted),
-                                int(ss.current_overall), opponents=opps,
-                                scoring_key=scoring_key, horizon=int(teams) * 2,
-                                loyalty_by_slot=_loyalty_by_slot)
-
-    # 1) the manager on the clock + their most-likely target
-    _who = on_clock_name or f"slot {on_clock_slot}"
-    now_pred = preds[0] if preds else None
-    if now_pred and now_pred.top:
-        nm, pos, conf = now_pred.top[0]
-        alts = " · ".join(f"{n} ({p})" for n, p, _ in now_pred.top[1:3])
-        st.markdown(
-            f'<div style="background:linear-gradient(100deg,#170d13,#101014);'
-            f'border:1px solid var(--accent2);border-radius:6px;padding:14px 18px;'
-            f'margin-bottom:10px;box-shadow:0 0 22px rgba(255,46,136,.18);">'
-            f'<span style="font:700 13px \'Space Grotesk\',sans-serif;'
-            f'text-transform:uppercase;letter-spacing:.5px;color:var(--accent2);">'
-            f'🔮 {_who} likely takes</span><br>'
-            f'<span class="pname">{nm}</span> '
-            f'<span class="pill pos-{pos}">{pos}</span> '
-            f'<span class="pmeta">· {int(conf*100)}% likely</span><br>'
-            f'<span class="pmeta">also in play: {alts}</span></div>',
-            unsafe_allow_html=True)
-
-    # 2) run detector — is a position getting hammered?
-    _run = CO.run_detector([p[2] for p in ss.pick_log])
-    if _run:
-        st.warning(_run)
-
-    # 3) SNIPE alerts — players an opponent covets that you can grab first
-    snipes = PROPH.find_snipes(preds, cfg, min_conf=0.35)
-    if snipes:
-        st.markdown('<div class="pmeta" style="margin:4px 0 2px;font-weight:700;'
-                    'text-transform:uppercase;letter-spacing:.4px;color:var(--accent);">'
-                    '⚠ Snipe alerts — grab now to deny</div>',
-                    unsafe_allow_html=True)
-        for sn in snipes[:4]:
-            _sniper = (opps.profiles[sn.coveted_by_slot].name
-                       if (opps and sn.coveted_by_slot in opps.profiles
-                           and opps.profiles[sn.coveted_by_slot].name)
-                       else f"slot {sn.coveted_by_slot}")
-            st.markdown(
-                f'<div style="background:var(--panel);border:1px solid var(--line);'
-                f'border-left:3px solid var(--accent);border-radius:5px;'
-                f'padding:8px 13px;margin-bottom:6px;">'
-                f'<span class="pname" style="font-size:14px;">{sn.player}</span> '
-                f'<span class="pill pos-{sn.position}">{sn.position}</span> '
-                f'<span class="pmeta">— {_sniper} wants him at pick '
-                f'{sn.their_pick_overall} ({int(sn.confidence*100)}%). '
-                f'You pick at {sn.your_pick_overall} — take him first.</span></div>',
-                unsafe_allow_html=True)
-    else:
-        st.caption("No high-confidence snipes right now — the board's calm.")
-
-    # 4) predicted board table up to your next pick
-    with st.expander(f"🔮 Predicted picks until your turn (in {picks_until_me})",
-                     expanded=False):
-        rows = []
-        for pr in preds[:picks_until_me + 1]:
-            who = ("YOU" if pr.is_me else
-                   (opps.profiles[pr.slot].name
-                    if (opps and pr.slot in opps.profiles and opps.profiles[pr.slot].name)
-                    else f"slot {pr.slot}"))
-            tgt = f"{pr.top[0][0]} ({pr.top[0][1]})" if pr.top else "—"
-            rows.append({"Pick": pr.overall, "Manager": who,
-                         "Likely target": tgt,
-                         "Conf": f"{int(pr.top[0][2]*100)}%" if pr.top else ""})
-        if rows:
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-
-    # 5) slim on-deck peek — your top 3 best-available so you're never blind
-    if recs:
-        st.markdown('<div class="pmeta" style="margin:8px 0 2px;font-weight:700;'
-                    'text-transform:uppercase;letter-spacing:.4px;">'
-                    '🎯 On deck for you — top 3 best-available</div>',
-                    unsafe_allow_html=True)
-        for r in recs[:3]:
+    for r in shown[:24]:
+        with st.container(border=True):
+            # One self-contained row block (renders well on desktop AND phone —
+            # no fragile multi-column split that collapses into slivers on mobile).
+            vva = ""
+            if r.value_vs_adp is not None:
+                sign = "+" if r.value_vs_adp >= 0 else ""
+                vva = f' · vs ADP {sign}{r.value_vs_adp}'
+            surv = (f' · {int(r.survival*100)}% to next'
+                    if r.survival is not None else "")
+            inj = (f' <span class="bdg bdg-urgent">{r.injury_chip}</span>'
+                   if r.injury_chip else "")
+            adp_txt = f"ADP {r.adp:.0f}" if r.adp else "ADP —"
             st.markdown(
                 f'<span class="pill pos-{r.position}">{r.position}</span> '
-                f'<span class="pname" style="font-size:14px;">{r.name}</span> '
-                f'<span class="pmeta">{r.team} · VORP {r.vorp} · T{r.tier}</span>',
+                f'<span class="pname">{r.name}</span>{inj}<br>'
+                f'<span class="pmeta">{r.team} · VORP {r.vorp} · T{r.tier} · '
+                f'{adp_txt}{vva}{surv}</span><br>'
+                f'<div style="margin-top:4px;">{_badges_html(r.badges, 3)}</div>',
                 unsafe_allow_html=True)
-        st.caption("Switch to 🎯 My Pick (or it flips automatically when you're "
-                   "on the clock) for the full command center.")
+            bc = st.columns(2)
+            if bc[0].button("✓ Draft", key=f"d_{r.name}", use_container_width=True):
+                _record_pick(cfg, r.name, r.position, mine=True, opps=opps)
+                st.rerun()
+            if bc[1].button("✗ Gone", key=f"g_{r.name}", use_container_width=True):
+                _mark_gone(cfg, r.name, opps)
+                st.rerun()
+            _render_why(r, key=f"row_{r.name}")
 
-
-with tab_board:
-    _render_board()
-
-
-# --------------------------------------------------------------------------- stack lab
-with tab_stack:
-    st.subheader("Stack Lab — schedule softness & correlation")
-    st.caption("Art + science: score any QB + WR/TE stack's pass-defense schedule, "
-               "weighted toward the fantasy playoff weeks (15-17).")
-    qbs = sorted([p.name for p in pool if p.position == "QB"])
-    catchers = sorted([p.name for p in pool if p.position in ("WR", "TE")])
-    scol = st.columns(2)
-    qb_pick = scol[0].selectbox("Quarterback", qbs,
-                                index=qbs.index("Matthew Stafford") if "Matthew Stafford" in qbs else 0)
-    pc_pick = scol[1].selectbox("Receiver", catchers,
-                                index=catchers.index("Davante Adams") if "Davante Adams" in catchers else 0)
-    ev = M.evaluate_stack(qb_pick, pc_pick)
-    if not ev:
-        st.warning("Those two aren't on the same team (or team schedule not loaded). "
-                   "Stacks require a shared team.")
-    else:
-        r = ev.report
-        gcol = st.columns(3)
-        gcol[0].metric("Stack grade", r.grade.split()[0])
-        gcol[1].metric("Soft weeks", r.soft_weeks)
-        gcol[2].metric("Playoff softness", f"{r.playoff_softness:+}")
-        st.caption(ev.correlation_note)
-        rows = []
-        for w in r.weeks:
-            rows.append({
-                "Week": w.week, "Opp": w.opponent or "BYE",
-                "PassTD allowed": w.pass_td_allowed if w.pass_td_allowed else "—",
-                "Softness": w.softness if w.softness is not None else "—",
-                "Playoff": "★" if w.is_playoff_week else "",
-            })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-
-
-# --------------------------------------------------------------------------- opponents
-with tab_opp:
-    st.subheader("Opponent modeling — who will actually be left?")
-    st.caption("Set how each manager tends to draft. The board's survival % "
-               "('WON'T LAST' / 'CAN WAIT') then reflects the SPECIFIC opponents "
-               "picking before your next turn — not a generic ADP curve. "
-               "Live picks also nudge profiles automatically as the draft unfolds.")
-
-    with st.expander("😈 Learn each manager's DNA from your league's PAST drafts",
-                     expanded=False):
-        st.caption("Pulls prior ESPN seasons (read-only, same cookies as "
-                   "live-connect) and derives each slot's REAL tendencies — who "
-                   "hammers RB early, who's a homer, who fades rookies — then "
-                   "auto-fills the profiles below so Prophecy predicts the actual humans.")
-        dcol = st.columns([1, 1, 2])
-        _dna_default = str(league_id) if str(league_id or "").strip() else ""
-        lh_league = dcol[0].text_input("League ID", value=_dna_default, key="lh_league")
-        lh_seasons = dcol[1].text_input("Past seasons (comma)", value="2021,2022,2023,2024,2025",
-                                        key="lh_seasons")
-        st.caption("Cookies are reused from your ESPN connect — to learn a "
-                   "different league, just change the League ID above.")
-        _s2 = ss.get("espn_s2", "")
-        _swid = ss.get("espn_swid", "")
-        if not (_s2 and _swid):
-            _cc = st.columns(2)
-            _s2 = _cc[0].text_input("espn_s2", type="password", key="lh_s2")
-            _swid = _cc[1].text_input("SWID", type="password", key="lh_swid")
-        if st.button("😈 Pull history & learn DNA (by person)"):
-            try:
-                _lid = str(lh_league or "").strip()
-                if not _lid.isdigit():
-                    st.warning("Enter your numeric ESPN League ID first "
-                               "(it's blank — connect a league in the sidebar, "
-                               "or type the ID here).")
-                    st.stop()
-                if _s2:
-                    ss.espn_s2 = _s2
-                if _swid:
-                    ss.espn_swid = _swid
-                seasons = [int(x) for x in lh_seasons.split(",") if x.strip()]
-                if not seasons:
-                    st.warning("Enter at least one past season, e.g. 2024,2025.")
-                    st.stop()
-                drafts = LH.pull_past_drafts(int(_lid), seasons,
-                                             ss.espn_s2, ss.espn_swid)
-                if not drafts:
-                    st.warning("No past drafts found (new league, wrong ID, or "
-                               "cookies needed for a private league).")
-                else:
-                    mgr_dna = LH.learn_dna_by_manager(drafts)
-                    slot_owner = LH.current_slot_to_owner(
-                        int(_lid), 2026, ss.espn_s2, ss.espn_swid)
-                    if slot_owner:
-                        applied = LH.apply_manager_dna(opps, mgr_dna, slot_owner)
-                        note = (f"Learned {len(mgr_dna)} managers by PERSON; "
-                                f"mapped {applied} to this year's seats.")
-                    else:
-                        # draft order not set yet — fall back to slot-based
-                        dna = LH.learn_dna(drafts)
-                        LH.apply_dna(opps, dna)
-                        note = (f"Learned {len(mgr_dna)} managers by person "
-                                f"(this year's draft order not set yet — applied "
-                                f"slot-based for now; re-run once the order posts).")
-                    ss["_dna"] = {m: d["dossier"] for m, d in mgr_dna.items()}
-                    st.success(note)
-            except Exception as ex:  # noqa: BLE001
-                st.error(f"History pull failed: {ex}")
-        if ss.get("_dna"):
-            st.markdown("**Manager dossiers:**")
-            for s_, doss in sorted(ss["_dna"].items()):
-                st.markdown(f"- {doss}")
-
-    tendency_opts = list(O.TENDENCY_POS_BIAS.keys())
-    teams_list = sorted({p.team for p in pool})
-    for s_ in range(1, int(teams) + 1):
-        prof = opps.profiles[s_]
-        is_me = (s_ == int(slot))
-        with st.container(border=True):
-            cc = st.columns([1, 3, 2, 2])
-            cc[0].markdown(f"**Slot {s_}**" + (" (YOU)" if is_me else ""))
-            if is_me:
-                cc[1].caption("your seat — not modeled as an opponent")
-                continue
-            _safe_default = [t for t in (prof.tendencies or []) if t in tendency_opts]
-            prof.tendencies = cc[1].multiselect(
-                "Tendencies", tendency_opts, default=_safe_default,
-                key=f"tend_{s_}") or ["ADP-robot"]
-            prof.rookie_averse = cc[2].checkbox("Rookie-averse", value=prof.rookie_averse,
-                                                key=f"rook_{s_}")
-            fav = cc[3].selectbox("Homer team", ["(none)"] + teams_list,
-                                  index=0 if not prof.favorite_team else
-                                  (teams_list.index(prof.favorite_team) + 1),
-                                  key=f"fav_{s_}")
-            prof.favorite_team = None if fav == "(none)" else fav
-    if st.button("Reset all to ADP-robot"):
-        for s_, prof in opps.profiles.items():
-            prof.tendencies = ["ADP-robot"]
-            prof.rookie_averse = False
-            prof.favorite_team = None
-        st.rerun()
-
-
-# --------------------------------------------------------------------------- strategy sim
-with tab_sim:
-    st.subheader("Optimal build — the best team you can draft from your slot")
-    st.caption("Your opponents draft realistically off each seat's learned DNA "
-               "+ loyalty picks + ADP (the crystal ball), so 'who's left at your "
-               "pick' mirrors your real league. At every one of YOUR picks the sim "
-               "takes the player that adds the most to your projected starting "
-               "lineup — the highest-scoring team you can actually assemble, not a "
-               "rigid strategy template.")
-    if st.button("Run simulation"):
-        try:
-            # crystal-ball opponents: build the per-slot loyalty map (same as
-            # Prophecy) so bots draft their DNA tendencies + repeat 'guys'
-            import re as _re
-
-            def _lnn(s):
-                s = (s or "").lower().strip()
-                s = _re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s)
-                s = _re.sub(r"[^a-z0-9 ]", "", s)
-                return _re.sub(r"\s+", " ", s).strip()
-
-            _loy = {}
-            _mdna = ss.get("_mgr_dna") or {}
-            _s2o = ss.get("_slot_to_owner") or {}
-            for _sl, _own in _s2o.items():
-                _dd = _mdna.get(_own)
-                if _dd and _dd.get("favorite_players"):
-                    _loy[int(_sl)] = {_lnn(nm): c
-                                      for nm, c in _dd["favorite_players"].items()}
-            results = SIM.compare_strategies(pool, cfg, scoring_key,
-                                             opponents=opps, loyalty_by_slot=_loy)
-            for res in results:
-                with st.container(border=True):
-                    st.markdown(f"**⭐ OPTIMAL BUILD** — "
-                                f"proj starting pts: {res.get('total_points','?')}")
-                    if res.get("summary"):
-                        st.caption(res["summary"])
-                    # map player name -> "R{round} · P{overall}" from the pick log
-                    _tm = int(teams)
-                    _when = {}
-                    for _ov, _nm, _ps in res.get("picks", []):
-                        _rd = (_ov - 1) // _tm + 1
-                        _when[_nm] = f"R{_rd} · P{_ov}"
-                    if res.get("lineup"):
-                        st.write({slot: (f"{v[0]} ({v[1]}) {v[2]}pts"
-                                         f"  —  {_when.get(v[0], '')}")
-                                  for slot, v in res["lineup"].items()})
-                # --- all 12 projected teams (opponents drafted by their DNA) ---
-                teams = res.get("all_teams") or []
-                if teams:
-                    ranked = sorted(teams, key=lambda t: -t["total_points"])
-                    with st.expander(f"📋 All {len(teams)} projected rosters "
-                                     f"(opponents drafted by their owner DNA)"):
-                        for ti, t in enumerate(ranked, 1):
-                            tag = " 👈 YOU" if t["is_me"] else ""
-                            st.markdown(f"**{ti}. {t['owner']}{tag}** — "
-                                        f"{t['total_points']:.0f} proj starting pts")
-                            if t["is_me"]:
-                                st.write({slot: (f"{v[0]} ({v[1]})  —  "
-                                                 f"{_when.get(v[0], '')}")
-                                          for slot, v in t["lineup"].items()
-                                          if v[0]})
-                            else:
-                                st.write({slot: f"{v[0]} ({v[1]})"
-                                          for slot, v in t["lineup"].items()
-                                          if v[0]})
-        except Exception as ex:  # noqa: BLE001
-            st.error(f"Sim error: {ex}")
-
-
-# --------------------------------------------------------------------------- weekly lineup
-with tab_week:
-    st.subheader("Weekly lineup optimizer — start/sit + why")
-    st.caption("Pick the optimal starters for a given week and get a plain-English "
-               "reason for every start/sit (matchup, dome, role, injury).")
-    if not ss.my_roster:
-        st.info("Draft some players first (Board or Enter Picks tab).")
-    else:
-        wk = st.number_input("Week", 1, 18, 15)
-        decisions = LO.optimize_week(list(ss.my_roster), pool, cfg, int(wk), scoring_key)
-        st.markdown("### Starters")
-        for d in decisions:
-            if d.started:
-                st.success(f"**{d.name}** ({d.slot}) — {d.weekly_points} pts  \n{d.narrative}")
-        st.markdown("### Bench")
-        for d in decisions:
-            if not d.started:
-                st.warning(f"**{d.name}** ({d.position}) — {d.weekly_points} pts  \n{d.narrative}")
-
-        # matchup-tilt close calls (season_tools cross-check)
-        _ssq = SEA.start_sit(list(ss.my_roster), pool, cfg, int(wk), scoring_key)
-        if _ssq.close_calls:
-            st.markdown("### ⚖️ Close calls (matchup-adjusted)")
-            for cc in _ssq.close_calls:
-                st.info(cc)
-
-    st.divider()
-    st.markdown("### 🔀 Trade evaluator")
-    st.caption("Enter players by name (comma-separated) for each side. Scored on "
-               "season VORP + best-starter value, with a plain verdict.")
-    _names = sorted(n for n, _ in ss.my_roster) if ss.my_roster else []
-    _allnames = [p.name for p in pool]
-    _give = st.multiselect("You GIVE", options=_allnames, default=[],
-                           key="trade_give")
-    _get = st.multiselect("You GET", options=_allnames, default=[],
-                          key="trade_get")
-    if _give and _get:
-        _pm = {p.name: p.position for p in pool}
-        tv = SEA.evaluate_trade([(n, _pm.get(n, "")) for n in _give],
-                                [(n, _pm.get(n, "")) for n in _get],
-                                pool, cfg, scoring_key)
-        _vc = {"WIN": st.success, "FAIR": st.info, "LOSE": st.error}[tv.verdict]
-        _vc(f"**{tv.verdict}** — {tv.note}")
-        _c1, _c2 = st.columns(2)
-        _c1.markdown("**Give**  \n" + "  \n".join(f"{n}: {v} VORP" for n, v in tv.give.detail))
-        _c2.markdown("**Get**  \n" + "  \n".join(f"{n}: {v} VORP" for n, v in tv.get.detail))
-
-
-# --------------------------------------------------------------------------- prophecy
-with tab_proph:
-    st.subheader("🔮 Draft Prophecy — what each rival takes next")
-    st.caption("Predicts every upcoming pick from each manager's tendencies + ADP + "
-               "value, then flags SNIPES: players a rival covets that you can grab "
-               "first. Set opponent styles in the Opponents tab to sharpen it.")
-    horizon = st.slider("Look ahead (picks)", 6, 36, 24)
-    preds = PROPH.predict_board(pool, cfg, set(ss.drafted),
-                                int(ss.current_overall), opponents=opps,
-                                scoring_key=scoring_key, horizon=int(horizon))
-    snipes = PROPH.find_snipes(preds, cfg)
-    if snipes:
-        st.markdown("#### 🎯 Snipe targets — take them first to deny a rival")
-        for s in snipes[:6]:
-            st.markdown(
-                f'<div style="background:linear-gradient(100deg,#2a1020,#3a1420);'
-                f'border:1px solid #f87171;border-radius:12px;padding:10px 14px;'
-                f'margin-bottom:6px;">'
-                f'<b style="color:#e8eef7;">{s.player}</b> '
-                f'<span class="pill pos-{s.position}">{s.position}</span> '
-                f'<span class="pmeta">— slot {s.coveted_by_slot} wants him at pick '
-                f'{s.their_pick_overall} ({int(s.confidence*100)}% likely). '
-                f'Grab him at your pick {s.your_pick_overall} to snipe.</span></div>',
-                unsafe_allow_html=True)
-    st.markdown("#### Predicted board")
-    rows = []
-    for p in preds:
-        who = "🫵 YOU" if p.is_me else f"slot {p.slot}"
-        picks_str = " · ".join(f"{nm} ({pos}) {int(c*100)}%" for nm, pos, c in p.top)
-        rows.append({"Overall": p.overall, "Team": who, "Likely picks": picks_str})
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-
-
-# --------------------------------------------------------------------------- roster
-with tab_roster:
-    st.subheader("Your roster")
-    if not ss.my_roster:
-        st.info("No players yet. Draft from the Board tab.")
-    else:
-        for n, pos in ss.my_roster:
-            raw = name_to_raw.get(n)
-            bye = f" · bye {raw.bye}" if raw and raw.bye else ""
-            st.write(f"- **{n}** ({pos}{bye})")
-        needs = X.open_needs(X.Roster(players=list(ss.my_roster)), cfg)
-        open_slots = {p: v for p, v in needs.items() if v > 0}
-        st.markdown("**Open starting needs:** " +
-                    (", ".join(f"{p}×{v:g}" for p, v in open_slots.items()) or "all filled"))
-
-        # ---- championship title-fit scorecard ----
-        st.markdown("### 🏆 Championship title-fit")
-        sc = A.score_roster(list(ss.my_roster), pool, cfg, scoring_key)
-        st.progress(min(1.0, sc.total / 100.0), text=f"{sc.total}/100")
-        ccols = st.columns(len(sc.components))
-        for (k, v), col in zip(sc.components.items(), ccols):
-            col.metric(k, v)
-        if sc.strengths:
-            st.success("**Strengths:** " + " · ".join(sc.strengths))
-        if sc.flags:
-            st.warning("**Gaps to fix:**\n\n" + "\n".join(f"- {f}" for f in sc.flags))
-
-    # ---- trash talk (paste in league chat) ----
-    if ss.get("_last_trash"):
-        tcol = st.columns([4, 1])
-        tcol[0].markdown(f'<div style="background:#1a2334;border:1px solid #233046;'
-                         f'border-radius:10px;padding:10px 14px;color:#fcd34d;'
-                         f'font-weight:600;">🗣️ {ss["_last_trash"]}</div>',
-                         unsafe_allow_html=True)
-        if tcol[1].button("🔁 New line") and ss.my_roster:
-            ss["_last_trash"] = CO.trash_talk(ss.my_roster[-1][0])
-            st.rerun()
-
-    # ---- regret journal ----
-    if ss.regret:
-        with st.expander(f"📓 Regret journal ({len(ss.regret)} passed players)"):
-            for nm, ov, by in reversed(ss.regret[-15:]):
-                st.markdown(f"- Passed **{nm}** — went at pick {ov} to {by}")
-
-    if st.button("Reset draft"):
-        ss.drafted = set()
-        ss.my_roster = []
-        ss.current_overall = 1
-        ss.pick_log = []
-        ss.team_rosters = {}
-        ss.undo_stack = []
-        ss.regret = []
-        ss["_last_trash"] = ""
-        ss["_sim"] = None
-        st.rerun()
-
-
-# --------------------------------------------------------------------------- waiver wire
-with tab_waiver:
-    st.subheader("📡 Waiver Wire — the in-season add/drop engine")
-    st.caption("After the draft: who to grab off the wire and who to cut. Ranks "
-               "free agents by ROS value + opportunity + matchup + injury openings "
-               "+ breakout lean. Connect a league to auto-detect who's actually free, "
-               "or paste a taken list.")
-
-    # figure out who's rostered in the league (free agents = pool − rostered)
-    rostered: set = set()
-    _fa_source = "manual"
-    wc = st.columns([1.4, 1, 1])
-    if ss.get("espn"):
-        if wc[0].button("🔄 Pull rosters from ESPN (find free agents)"):
-            try:
-                with st.spinner("Reading league rosters…"):
-                    rp = ss.espn.rostered_players()
-                ss["_rostered"] = list(rp["names"])
-                ss["_rostered_by_team"] = rp["by_team"]
-                st.success(f"{len(rp['names'])} players rostered across the league "
-                           "— everyone else is a free agent.")
-            except Exception as ex:  # noqa: BLE001
-                st.error(f"Couldn't read rosters: {ex}")
-    if ss.get("_rostered"):
-        rostered = set(ss["_rostered"])
-        _fa_source = "espn"
-        st.caption(f"✅ Free agents computed from your live ESPN league "
-                   f"({len(rostered)} rostered).")
-    else:
-        # fallback: treat drafted + my_roster as taken, plus a manual paste
-        rostered = set(ss.drafted) | {n for n, _ in ss.my_roster}
-        _paste = st.text_area("Or paste taken players (one per line) to exclude",
-                              height=80, key="wv_taken")
-        if _paste.strip():
-            rostered |= {ln.strip() for ln in _paste.splitlines() if ln.strip()}
-        st.caption("Using drafted/rostered players as 'taken'. Connect ESPN + pull "
-                   "rosters for exact free agents in your league.")
-
-    pos_filter = wc[1].multiselect("Positions", ["QB", "RB", "WR", "TE", "K", "DST"],
-                                   key="wv_pos")
-    faab_budget = wc[2].number_input("FAAB budget ($)", 0, 1000, 100, key="wv_faab")
-
-    targets = WV.find_waiver_targets(pool, cfg, rostered, scoring_key,
-                                     positions=pos_filter or None, top_n=30,
-                                     my_roster=list(ss.my_roster))
-    if not targets:
-        st.info("No available free agents match — widen the position filter or "
-                "reduce the taken list.")
-    else:
-        _flt = st.radio("Show", ["All", "⭐ Stars only", "🚀 Rockets only",
-                                 "⭐/🚀 Flagged only"], horizontal=True,
-                        label_visibility="collapsed", key="wv_flag_filter")
-        _shown = targets
-        if _flt == "⭐ Stars only":
-            _shown = [t for t in targets if t.star]
-        elif _flt == "🚀 Rockets only":
-            _shown = [t for t in targets if t.rocket]
-        elif _flt == "⭐/🚀 Flagged only":
-            _shown = [t for t in targets if t.star or t.rocket]
-        _n_star = sum(1 for t in targets if t.star)
-        _n_rocket = sum(1 for t in targets if t.rocket)
-        st.markdown(f"### 🎯 Top pickups &nbsp;"
-                    f'<span class="pmeta">⭐ {_n_star} stars · 🚀 {_n_rocket} rockets</span>',
-                    unsafe_allow_html=True)
-        if not _shown:
-            st.caption("None flagged in the current list — switch back to All.")
-        for i, t in enumerate(_shown[:20]):
-            _pcolor = {"MUST-ADD": "var(--accent)", "STRONG": "var(--good)",
-                       "SPECULATIVE": "var(--warn)", "STASH": "var(--dim)"}.get(
-                           t.priority, "var(--dim)")
-            with st.container(border=True):
-                cols = st.columns([3.2, 0.9, 0.9, 1.1, 4])
-                star = " ⭐" if i == 0 else ""
-                _tags = ""
-                if t.rocket:
-                    _tags += ('<span class="bdg" style="border-color:var(--warn);'
-                              'color:var(--warn);">🚀 ROCKET</span> ')
-                if t.star:
-                    _tags += ('<span class="bdg" style="border-color:var(--accent);'
-                              'color:var(--accent);">⭐ STAR</span> ')
-                _iconcolor = {"🔥": "var(--bad)", "🕳️": "var(--accent2)",
-                              "📅": "var(--good)", "🩹": "var(--warn)",
-                              "🪤": "var(--dim)", "💎": "var(--soft, var(--accent))"}
-                for label, tip in (t.icons or []):
-                    _c = next((v for k, v in _iconcolor.items() if label.startswith(k)),
-                              "var(--dim)")
-                    _tags += (f'<span class="bdg" title="{tip}" '
-                              f'style="border-color:{_c};color:{_c};">{label}</span> ')
-                cols[0].markdown(
-                    f'<span class="pill pos-{t.position}">{t.position}</span> '
-                    f'<span class="pname">{t.name}{star}</span> {_tags}<br>'
-                    f'<span class="pmeta">{t.team} · {t.ros_points:.0f} pts ROS'
-                    + (f' · 🏥 {t.injury_note}' if t.injury_note else '') + '</span>'
-                    + (f'<br><span class="pmeta" style="color:var(--accent);">⭐ '
-                       f'{t.star_note}</span>' if t.star and t.star_note else ''),
-                    unsafe_allow_html=True)
-                cols[1].metric("Score", t.pickup_score)
-                cols[2].metric("ROS VORP", t.ros_vorp)
-                # FAAB in real dollars off the budget
-                _bid = max(1, round(t.faab_pct / 100 * faab_budget)) if faab_budget else t.faab_pct
-                cols[3].metric("FAAB bid", f"${_bid}" if faab_budget else f"{t.faab_pct}%")
-                cols[4].markdown(
-                    f'<span class="bdg" style="border-color:{_pcolor};color:{_pcolor};">'
-                    f'{t.priority}</span> '
-                    + " ".join(f'<span class="bdg bdg-soft">{r}</span>'
-                               for r in t.reasons),
-                    unsafe_allow_html=True)
-
-    # drop candidates from MY roster
-    if ss.my_roster:
-        st.markdown("### 🪓 Drop candidates (make room)")
-        drops = WV.drop_candidates(list(ss.my_roster), pool, cfg, scoring_key, n=5)
-        for d in drops:
-            st.markdown(
-                f'<span class="pill pos-{d.position}">{d.position}</span> '
-                f'<span class="pname" style="font-size:14px;">{d.name}</span> '
-                f'<span class="pmeta">— {d.reason}</span>',
-                unsafe_allow_html=True)
-    else:
-        st.caption("Draft/roster some players and they'll show here as drop options.")
-
-
-# --------------------------------------------------------------------------- rankings
-with tab_rank:
-    st.subheader("📊 Rankings — consensus ADP vs Shredder's own board")
-    st.caption("Consensus ADP blends every reliable public source we can fetch "
-               "(FantasyPros expert consensus + FantasyFootballCalculator live "
-               "mock ADP + Sleeper), averaged per player. Shredder Rank is OUR "
-               "answer — every player scored by the full Edge Engine: projection → "
-               "VORP → tiers + opportunity (target/snap/O-line/pace) + matchup "
-               "softness + consistency + injury + breakout lean. Delta shows where "
-               "we disagree with the market.")
-    rc = st.columns([1, 1, 1])
-    _rpos = rc[0].multiselect("Position", ["QB", "RB", "WR", "TE", "K", "DST"],
-                              key="rk_pos")
-    _rverdict = rc[1].multiselect("Verdict", ["VALUE", "FAIR", "REACH"], key="rk_verdict")
-    _rtopn = rc[2].number_input("Show top N", 25, 300, 150, step=25, key="rk_topn")
-
-    rankings = SR.build_rankings(pool, cfg, scoring_key, top_n=int(_rtopn))
-    shown = [r for r in rankings
-             if (not _rpos or r.position in _rpos)
-             and (not _rverdict or r.verdict in _rverdict)]
-
-    _n_val = sum(1 for r in rankings if r.verdict == "VALUE")
-    _n_reach = sum(1 for r in rankings if r.verdict == "REACH")
-    st.markdown(f'<span class="pmeta">🟢 {_n_val} values · 🔴 {_n_reach} reaches · '
-                f'{len(rankings)} ranked · consensus from up to 3 sources</span>',
-                unsafe_allow_html=True)
-
-    _table = []
-    for r in shown:
-        _vcolor = {"VALUE": "🟢", "REACH": "🔴", "FAIR": "⚪"}.get(r.verdict, "")
-        _table.append({
-            "Shredder": r.shredder_rank,
-            "Player": r.name,
-            "Pos": f"{r.position}{r.pos_rank}",
-            "Tier": f"T{r.tier}",
-            "Team": r.team,
-            "Consensus ADP": r.consensus_adp if r.consensus_adp else "—",
-            "Δ": (f"{'+' if (r.delta or 0) >= 0 else ''}{r.delta}"
-                  if r.delta is not None else "—"),
-            "Read": f"{_vcolor} {r.verdict}",
-            "Srcs": r.adp_sources,
-            "Composite": r.composite,
-            "VORP": r.vorp,
-            "Why": " · ".join(r.badges),
-        })
-    st.dataframe(_table, use_container_width=True, hide_index=True, height=560)
-
-    # CSV download (emoji stripped for Excel)
-    import io as _io, csv as _csv, re as _re
-    _EMO = _re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
-    _buf = _io.StringIO()
-    if _table:
-        w = _csv.DictWriter(_buf, fieldnames=list(_table[0].keys()))
-        w.writeheader()
-        for row in _table:
-            w.writerow({k: _EMO.sub("", str(v)).strip() for k, v in row.items()})
-    st.download_button("⬇️ Download rankings (CSV)", _buf.getvalue().encode("utf-8-sig"),
-                       file_name="shredder_rankings_2026.csv", mime="text/csv")
-
-
-# --------------------------------------------------------------------------- shadow ledger
-with tab_ledger:
-    st.subheader("📒 Shadow Ledger — how Shredder's picks would have done")
-    st.caption("At every pick we logged what Shredder recommended vs what you "
-               "actually drafted. Each week (auto-scored Tuesdays) we tally both "
-               "rosters' real fantasy points, so you see whether the copilot's "
-               "calls beat yours — cumulatively, all season.")
-    _led = SLG.load()
-    _picks = _led.get("picks", [])
-    if not _picks:
-        st.info("No picks logged yet. Draft in the app (Board or Enter Picks) and "
-                "each of your picks records Shredder's shadow recommendation "
-                "alongside it. Weekly scoring starts once the season begins.")
-    else:
-        _cum = SLG.cumulative(_led)
-        mc = st.columns(3)
-        mc[0].metric("Your team (season)", _cum["actual_total"])
-        mc[1].metric("🕶️ Shadow team (season)", _cum["shadow_total"])
-        mc[2].metric("Shadow − You", f"{'+' if _cum['delta_total']>=0 else ''}"
-                     f"{_cum['delta_total']}",
-                     help="Positive = Shredder's team would have outscored yours")
-
-        if _cum["series"]:
-            import pandas as _pd
-            _df = _pd.DataFrame(_cum["series"])
-            st.line_chart(_df.set_index("week")[["actual_cum", "shadow_cum"]],
-                          color=["#ececef", "#e8ff53"])
-            st.caption(f"Cumulative points by week · {_cum['weeks_scored']} week(s) scored.")
-
-        st.markdown("### Pick-by-pick verdict")
-        _verd = SLG.per_player_verdict(_led)
-        _vtable = []
-        for v in _verd:
-            _vi = {"SHREDDER WON": "🕶️", "YOU WON": "✅", "SAME PICK": "🤝",
-                   "TIE": "➖"}.get(v["verdict"], "")
-            _vtable.append({
-                "Rd": v["round"], "Overall": v["overall"],
-                "You drafted": v["actual"], "Your pts": v["actual_pts"],
-                "Shredder wanted": v["shredder"], "Shadow pts": v["shredder_pts"],
-                "Verdict": f"{_vi} {v['verdict']}",
-            })
-        st.dataframe(_vtable, use_container_width=True, hide_index=True)
-
-        with st.expander("🕶️ Full shadow roster (what Shredder would have built)"):
-            for nm, pos in SLG.shadow_roster(_led):
-                st.markdown(f'<span class="pill pos-{pos}">{pos}</span> '
-                            f'<span class="pname" style="font-size:14px;">{nm}</span>',
-                            unsafe_allow_html=True)
-        st.caption("Auto-scored every Tuesday by the `shadow_score` cron. "
-                   "To force a score now, trigger that cron or run it with a week number.")
-
-
-# --------------------------------------------------------------------------- live & lines
-with tab_live:
-    st.subheader("🎲 Live & Lines — scores, betting lines, upset radar")
-    st.caption("Live NFL scoreboard with betting lines (spread / over-under) from "
-               "ESPN's free feed. The Upset Radar flags a pregame favorite in "
-               "trouble — heat rises with a bigger favorite trailing later in the "
-               "game. Not betting advice; just a live read on where chalk is cracking.")
-    if st.button("🔄 Refresh live games"):
-        ss["_live_games"] = LG.fetch_live_games()
-    if "_live_games" not in ss:
-        ss["_live_games"] = LG.fetch_live_games()
-    _games = ss.get("_live_games") or []
-
-    if not _games:
-        st.info("No games available from the feed right now (offline, or no slate "
-                "today). Hit refresh during game windows.")
-    else:
-        _alerts = [g for g in _games if g.status == "in" and g.upset_heat >= 40]
-        if _alerts:
-            for g in _alerts:
-                st.markdown(
-                    f'<div style="background:linear-gradient(100deg,#170d13,#1a0f0a);'
-                    f'border:1px solid var(--bad);border-left:3px solid var(--bad);'
-                    f'border-radius:6px;padding:10px 15px;margin-bottom:8px;'
-                    f'box-shadow:0 0 20px rgba(255,77,94,.2);">'
-                    f'<span style="font:700 13px \'Space Grotesk\',sans-serif;'
-                    f'color:var(--bad);text-transform:uppercase;">🚨 UPSET BREWING</span> '
-                    f'<span class="pmeta">heat {int(g.upset_heat)}/100</span><br>'
-                    f'<span style="color:#f5b6b6;">{g.upset_note}</span> — '
-                    f'{g.away} {g.away_score} @ {g.home} {g.home_score}</div>',
-                    unsafe_allow_html=True)
-
-        _live = [g for g in _games if g.status == "in"]
-        _other = [g for g in _games if g.status != "in"]
-
-        # model-vs-market VALUE EDGES (our live win-prob diverges from the book)
-        _edges = sorted([g for g in _live if abs(g.edge_fav) >= 0.08],
-                        key=lambda g: abs(g.edge_fav), reverse=True)
-        for g in _edges:
-            _side = g.favorite if g.edge_fav > 0 else (
-                g.away if g.favorite == g.home else g.home)
-            _mp = int((g.model_p_fav or 0) * 100)
-            _kp = int((g.market_p_fav or 0) * 100)
-            st.markdown(
-                f'<div style="background:linear-gradient(100deg,#0d1a10,#101410);'
-                f'border:1px solid var(--accent);border-left:3px solid var(--accent);'
-                f'border-radius:6px;padding:10px 15px;margin-bottom:8px;">'
-                f'<span style="font:700 13px \'Space Grotesk\',sans-serif;'
-                f'color:var(--accent);text-transform:uppercase;">💹 VALUE EDGE — '
-                f'{g.edge_note}</span> '
-                f'<span class="pmeta">edge {abs(g.edge_fav)*100:.0f} pts</span><br>'
-                f'<span style="color:#d7f5c9;">{g.away} @ {g.home} — my model '
-                f'{_mp}% fav vs book {_kp}% → lean <b>{_side}</b></span></div>',
-                unsafe_allow_html=True)
-
-        for label, group in (("● LIVE NOW", _live), ("Scheduled / Final", _other)):
-            if not group:
-                continue
-            st.markdown(f'<div class="pmeta" style="margin:8px 0 4px;font-weight:700;'
-                        f'text-transform:uppercase;letter-spacing:.4px;">{label}</div>',
-                        unsafe_allow_html=True)
-            for g in group:
-                _heatbar = ""
-                if g.status == "in" and g.upset_heat > 0:
-                    _c = "var(--bad)" if g.upset_heat >= 60 else ("var(--warn)"
-                          if g.upset_heat >= 40 else "var(--dim)")
-                    _heatbar = (f'<div style="height:5px;background:var(--line);'
-                                f'border-radius:3px;margin-top:6px;">'
-                                f'<div style="height:5px;width:{int(g.upset_heat)}%;'
-                                f'background:{_c};border-radius:3px;"></div></div>')
-                _line = (f'{g.spread}' + (f' · O/U {g.over_under}' if g.over_under else '')) \
-                    if g.spread else 'no line'
-                _wp = ""
-                if g.status == "in" and g.model_p_fav is not None:
-                    _e = g.edge_fav
-                    _ecol = ("var(--accent)" if abs(_e) >= 0.08 else "var(--dim)")
-                    _wp = (f'<br><span class="pmeta">🧮 my model '
-                           f'{int(g.model_p_fav*100)}% {g.favorite} · book '
-                           f'{int((g.market_p_fav or 0)*100)}% · '
-                           f'<span style="color:{_ecol};">edge '
-                           f'{"+" if _e>=0 else ""}{_e*100:.0f}'
-                           f'{(" — "+g.edge_note) if g.edge_note else ""}</span></span>')
-                with st.container(border=True):
-                    st.markdown(
-                        f'<span class="pname">{g.away} {g.away_score} @ '
-                        f'{g.home} {g.home_score}</span> '
-                        f'<span class="pmeta">· {g.detail}</span><br>'
-                        f'<span class="bdg bdg-soft">{_line}</span>'
-                        + (f' <span class="pmeta">· {g.upset_note}</span>'
-                           if g.upset_note else '')
-                        + _wp + _heatbar,
-                        unsafe_allow_html=True)
-
-
-# --------------------------------------------------------------------------- value history
-with tab_value:
-    st.subheader("📈 Value History — who beats their draft slot (2021–2025)")
-    st.caption("5 seasons of real data: where players were DRAFTED at their "
-               "position vs where they FINISHED. Within-position, so it's real "
-               "skill/role signal — not the 'QBs go late' artifact. Actuals "
-               "computed from nflverse play-by-play; ADP from historical mock drafts.")
-    import os as _os2, json as _json2
-    _vpath = _os2.path.join(_os2.path.dirname(__file__), "data", "value_study_5yr.json")
-    if not _os2.path.exists(_vpath):
-        st.info("Study data not found — run the value-study builder to generate "
-                "data/value_study_5yr.json.")
-    else:
-        _vs = _json2.load(open(_vpath, encoding="utf-8"))
-        st.markdown(
-            '<div style="background:var(--panel);border:1px solid var(--line);'
-            'border-left:3px solid var(--accent);border-radius:6px;padding:10px 14px;'
-            'margin-bottom:10px;"><span style="color:var(--accent);font-weight:700;">'
-            'What 5 years say</span><br><span class="pmeta">'
-            '📈 Overachievers = RBs who inherit a bellcow role (injury / depth-chart '
-            'opening) — opportunity beats talent. 📉 Busts = injury or absence, '
-            'overwhelmingly. Both are already levers in the board (role/opportunity '
-            '+ injury), shown here as evidence, not a value bump.</span></div>',
-            unsafe_allow_html=True)
-
-        cA, cB = st.columns(2)
-        with cA:
-            st.markdown("### 📈 Top overachievers")
-            for r in _vs.get("top_overachievers", [])[:12]:
-                st.markdown(
-                    f'<span class="pill pos-{r["pos"]}">{r["pos"]}</span> '
-                    f'<span class="pname" style="font-size:14px;">{r["name"]}</span> '
-                    f'<span class="pmeta">{r["year"]} · {r["pos"]}{r["pos_adp_rank"]} '
-                    f'drafted → {r["pos"]}{r["pos_finish_rank"]} finish '
-                    f'<b style="color:var(--good);">(+{r["gap"]})</b></span>',
-                    unsafe_allow_html=True)
-        with cB:
-            st.markdown("### 📉 Biggest busts")
-            for r in _vs.get("top_busts", [])[:12]:
-                st.markdown(
-                    f'<span class="pill pos-{r["pos"]}">{r["pos"]}</span> '
-                    f'<span class="pname" style="font-size:14px;">{r["name"]}</span> '
-                    f'<span class="pmeta">{r["year"]} · {r["pos"]}{r["pos_adp_rank"]} '
-                    f'drafted → {r["pos"]}{r["pos_finish_rank"]} finish '
-                    f'<b style="color:var(--bad);">({r["gap"]})</b></span>',
-                    unsafe_allow_html=True)
-
-        st.markdown("### Browse a season")
-        _yr = st.selectbox("Season", ["2025", "2024", "2023", "2022", "2021"],
-                           key="vh_year")
-        _byyr = _vs.get("by_year", {}).get(_yr, [])
-        _pf = st.multiselect("Position", ["QB", "RB", "WR", "TE"], key="vh_pos")
-        _scored = [r for r in _byyr if r.get("gap") is not None
-                   and (not _pf or r["pos"] in _pf)]
-        _scored.sort(key=lambda r: r["gap"], reverse=True)
-        _tbl = [{"Player": r["name"], "Pos": r["pos"],
-                 "Drafted": f'{r["pos"]}{r["pos_adp_rank"]}',
-                 "Finished": f'{r["pos"]}{r["pos_finish_rank"]}',
-                 "Gap": f'{"+" if r["gap"]>=0 else ""}{r["gap"]}',
-                 "Pts": r["pts"]} for r in _scored]
-        st.dataframe(_tbl, use_container_width=True, hide_index=True, height=420)
-        st.caption("Gap = positional draft rank − positional finish rank. "
-                   "Positive = beat their draft slot.")
-
-
-# --------------------------------------------------------------------------- roster lab
-with tab_lab:
-    st.subheader("🧬 Roster Lab — the structural edges")
-    st.caption("Bye collisions, same-team clusters, the tier cliff on positions you "
-               "still need, handcuffs, and your fantasy-playoff (wks 15-17) slate. "
-               "All informational — it never changes a player's value.")
-    _mr = list(ss.my_roster)
-    _dr = set(ss.drafted)
-
-    # Tier-cliff alarm — most actionable, put it first
-    st.markdown("#### ⛰️ Tier-cliff / roster-need alarm")
-    _cliffs = RLAB.tier_cliff(pool, _dr, _mr, scoring_key)
-    _urgent = [c for c in _cliffs if c.urgency in ("now", "soon")]
-    if not _cliffs:
-        st.success("No positional needs flagged — roster targets met.")
-    else:
-        for c in _cliffs:
-            _ic = {"now": "🚨", "soon": "⚠️", "ok": "✅"}[c.urgency]
-            (st.error if c.urgency == "now" else st.warning if c.urgency == "soon"
-             else st.info)(f"{_ic} **{c.position}** — {c.note}")
-
-    st.markdown("#### 🏆 Fantasy-playoff slate (weeks 15-17)")
-    if not _mr:
-        st.caption("Draft players to grade their playoff schedules.")
-    else:
-        for name, pos in _mr:
-            if pos in ("K", "DST"):
-                continue
-            _ps = RLAB.playoff_slate(name, pool)
-            if _ps:
-                _wk = " · ".join(f"wk{w} vs {o or 'BYE'}" for w, o in _ps.weeks)
-                _col = {"A": "🟢", "B": "🟢", "C": "🟡", "D": "🔴"}[_ps.grade]
-                st.markdown(f"{_col} **{name}** ({_ps.team}) — grade {_ps.grade}: {_ps.note}  \n"
-                            f"<span class='pmeta'>{_wk}</span>", unsafe_allow_html=True)
-
-    st.markdown("#### 🔒 Handcuffs (contingent value)")
-    _hcs = RLAB.handcuffs(pool, _dr, _mr, scoring_key)
-    if not _hcs:
-        st.caption("Draft an RB to see his handcuff.")
-    for h in _hcs:
-        (st.info if h.backup_available else st.caption)(
-            ("🟢 " if h.backup_available else "⚫ ") + h.note)
-
-    st.markdown("#### 📅 Bye-week collisions")
-    _byes = RLAB.bye_collisions(_mr, pool)
-    _bad = [b for b in _byes if b.severity in ("danger", "warn")]
-    if not _mr:
-        st.caption("Draft players to check bye overlap.")
-    elif not _bad:
-        st.success("No dangerous bye stacking on your roster.")
-    else:
-        for b in _bad:
-            _names = ", ".join(f"{n} ({p})" for n, p in b.players)
-            (st.error if b.severity == "danger" else st.warning)(
-                f"**Week {b.week}** — {b.note}  \n_{_names}_")
-
-    st.markdown("#### 🔗 Same-team clusters")
-    _cl = RLAB.stack_clusters(_mr, pool)
-    if not _cl:
-        st.caption("No multi-player team clusters yet.")
-    for c in _cl:
-        (st.success if c.kind == "stack" else st.warning)(
-            ("🔗 " if c.kind == "stack" else "⚠️ ") + c.note
-            + " — " + ", ".join(n for n, _ in c.players))
-
-
-# --------------------------------------------------------------------------- manual picks
-with tab_picks:
-    st.subheader("Enter picks (manual mode)")
-    st.caption("Tap players off as they're drafted anywhere in the room. "
-               "Use this for ESPN/Yahoo/NFL or any offline draft.")
-    avail = sorted([p.name for p in pool if p.name not in ss.drafted])
-    who = st.selectbox("Player drafted", avail) if avail else None
-    mcol = st.columns(3)
-    if who and mcol[0].button("Drafted by ME"):
-        raw = name_to_raw[who]
-        _record_pick(who, raw.position, mine=True)
-        st.rerun()
-    if who and mcol[1].button("Drafted by SOMEONE ELSE"):
-        _record_pick(who, name_to_raw[who].position, mine=False)
-        st.rerun()
-    mcol[2].metric("Drafted so far", len(ss.drafted))
+with right:
+    _render_roster_panel(rstate, cfg)
+    _render_recent_picks()

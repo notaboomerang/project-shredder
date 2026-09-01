@@ -124,6 +124,28 @@ def pull_past_drafts(league_id: int, seasons: list[int], espn_s2: str = "",
     return drafts
 
 
+def season_contexts(league_id: int, seasons: list[int], espn_s2: str = "",
+                    swid: str = "") -> dict:
+    """Per-season league context so a manager's history reads correctly across
+    format/size changes. Returns {season: {teams, scoring_format, reception,
+    scoring_key}}. Empty entries for seasons ESPN can't return."""
+    out: dict = {}
+    if EC is None:
+        return out
+    for yr in seasons:
+        try:
+            prof = EC.EspnClient(int(league_id), int(yr), espn_s2, swid).settings_profile()
+            sc = prof.get("scoring") or {}
+            rp = sc.get("reception", 0.5)
+            key = "ppr" if rp >= 1.0 else ("half" if rp >= 0.5 else "std")
+            out[yr] = {"teams": prof.get("teams"),
+                       "scoring_format": prof.get("scoring_format"),
+                       "reception": rp, "scoring_key": key}
+        except Exception:  # noqa: BLE001
+            out[yr] = {}
+    return out
+
+
 def _norm_name(s: str) -> str:
     """Normalize a player name for matching (lowercase, strip suffix/punct)."""
     import re

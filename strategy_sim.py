@@ -300,6 +300,11 @@ def _pick_best_lineup_value(cands, my_picked, rnd, cfg):
         # a 2nd QB is never a starting-lineup upgrade — skip unless QB slot empty
         if pos == "QB" and have.get("QB", 0) >= st.get("QB", 1):
             continue
+        # a 2nd TE almost never beats an RB/WR in the FLEX and TE is streamable —
+        # skip once the TE starter slot is filled (unless TE is somehow still a
+        # starter need). Mirrors the QB rail; kills the recurring "stacked TEs".
+        if pos == "TE" and have.get("TE", 0) >= st.get("TE", 1):
+            continue
         # raw lineup improvement from adding this player
         _, new_total = _build_lineup(my_picked + [c], cfg)
         raw_gain = new_total - base_total

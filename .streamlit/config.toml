@@ -8,3 +8,14 @@ font = "monospace"
 
 [server]
 headless = true
+port = 8666
+# bind to all interfaces so your phone can reach it over Wi-Fi (same network)
+address = "0.0.0.0"
+# allow the phone (a different origin than localhost) to connect
+enableCORS = false
+enableXsrfProtection = false
+# don't try to pop a browser on the laptop when launched headless
+runOnSave = false
+
+[browser]
+gatherUsageStats = false

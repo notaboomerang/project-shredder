@@ -1,11 +1,14 @@
 # ==== SECRETS — never commit ====
-data/espn_cookies.json      # ESPN session cookies (espn_s2 + SWID) — private login
-data/leagues.json           # your saved ESPN league IDs
+# ESPN session cookies (espn_s2 + SWID) — private login
+data/espn_cookies.json
+# your saved ESPN league IDs
+data/leagues.json
 .env
 *.secret
 
 # ==== Large / regenerable data (too big or re-downloadable) ====
-data/pbp_2024.csv           # ~99MB nflverse play-by-play — regenerate, don't commit
+# ~99MB nflverse play-by-play — regenerate, don't commit
+data/pbp_2024.csv
 data/*.parquet
 
 # ==== Python ====
@@ -29,3 +32,16 @@ Thumbs.db
 # ==== Large media (optional — keep repo lean) ====
 assets/*.mp4
 assets/vo/
+
+# ==== Deploy / runtime scratch (never commit) ====
+# tunnel binary auto-downloaded by run_phone.py (~30MB)
+cloudflared.exe
+data/poller_log.txt
+data/poller_err.txt
+data/poller_status.json
+data/live_picks.json
+# persisted ESPN browser profile (local login)
+data/espn_profile/
+data/archive/
+# your personal draft-vs-Shredder log
+data/shadow_ledger.json
