@@ -1006,44 +1006,84 @@ def _bookmarklet_js(base_url):
 
 
 def _render_bookmarklet_setup():
-    """Sidebar helper that hands a leaguemate the one-tap login bookmarklet."""
+    """Phone-first one-tap login setup. Auto-detects iPhone / Android / computer
+    and shows ONLY the steps for that device, so a leaguemate isn't wading through
+    a wall of instructions for platforms they aren't on. One-time ~30s setup,
+    then it's a single tap every draft. Uses components.html so the copy button
+    and platform switch actually run JS."""
+    import json as _json
+    import streamlit.components.v1 as _components
     base = _app_base_url()
     bm = _bookmarklet_js(base)
-    with st.sidebar.expander("📲 One-tap login (set up once)", expanded=False):
-        st.markdown("**Step 1 — copy this code:**")
-        st.code(bm, language="text")
-        st.caption("Tap the copy icon on the box above.")
+    bm_js = _json.dumps(bm)          # safe-embed the bookmarklet as a JS string
+    accent = "#31c48d"
+    with st.sidebar.expander("📲 One-tap login — set up once (~30s)", expanded=False):
+        st.caption("The easiest way to connect. Do this once; after that it's a "
+                   "single tap every draft. Your cookies go straight from ESPN "
+                   "into your own private session — never stored on the server.")
+        _components.html(f"""
+<div id="wrap" style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#e6e6e6;">
+  <button id="copybtn" style="width:100%;padding:12px;border:none;border-radius:10px;
+     background:{accent};color:#06231a;font-weight:800;font-size:15px;cursor:pointer;">
+     1️⃣  Copy my Shredder login</button>
+  <div id="copied" style="display:none;margin:6px 0 0;color:{accent};font-weight:700;">
+     ✓ Copied — now do step 2 below.</div>
 
-        st.markdown("**Step 2 — save it as a bookmark:**")
-        st.markdown(
-            "**iPhone (Safari):**\n"
-            "1. Tap the **Share** button → **Add Bookmark** → Save.\n"
-            "2. Tap the **book icon** → **Edit** → open that new bookmark.\n"
-            "3. Clear the address line, **paste** the copied code, name it "
-            "**Shredder** → Done.")
-        st.markdown(
-            "**Android (Chrome):**\n"
-            "1. Tap **⋮** → the **star** to bookmark this page.\n"
-            "2. Tap **⋮ → Bookmarks**, open the new one → **Edit** (pencil).\n"
-            "3. Replace the URL with the **pasted** code, name it **Shredder** "
-            "→ save.")
+  <div id="ios" style="display:none;margin-top:14px;">
+    <b>iPhone (Safari) — one time:</b>
+    <ol style="margin:6px 0 0 18px;padding:0;">
+      <li>Tap <b>Share</b> → <b>Add Bookmark</b> → Save.</li>
+      <li>Tap the <b>book</b> icon → <b>Edit</b> → open that bookmark.</li>
+      <li>Clear the address line, <b>paste</b>, name it <b>Shredder</b> → Done.</li>
+    </ol>
+  </div>
+  <div id="android" style="display:none;margin-top:14px;">
+    <b>Android (Chrome) — one time:</b>
+    <ol style="margin:6px 0 0 18px;padding:0;">
+      <li>Tap <b>⋮</b> → the <b>★</b> to bookmark this page.</li>
+      <li>Tap <b>⋮ → Bookmarks</b>, open it → <b>Edit</b> (pencil).</li>
+      <li>Replace the URL with the <b>pasted</b> code, name it <b>Shredder</b> → save.</li>
+    </ol>
+  </div>
+  <div id="desktop" style="display:none;margin-top:14px;">
+    <b>Computer — one time:</b> drag this button to your bookmarks bar →
+    <a id="dtlink" href="#" style="display:inline-block;padding:5px 10px;border:1px solid {accent};
+       border-radius:8px;color:{accent};text-decoration:none;font-weight:700;">🔗 Shredder login</a>
+  </div>
 
-        st.markdown("**Step 3 — use it (every draft):**")
-        st.markdown(
-            "1. Open **fantasy.espn.com** and make sure you're logged in.\n"
-            "2. In the address bar, type **Shredder** and tap the bookmark.\n"
-            "3. Shredder opens **already connected** — no typing. 🎸")
-
-        st.markdown(
-            f'<a href="{bm}" style="display:inline-block;padding:6px 12px;'
-            f'margin-top:6px;border:1px solid var(--accent);border-radius:8px;'
-            f'color:var(--accent);text-decoration:none;font-weight:700;">'
-            f'🔗 Shredder login</a> '
-            f'<span class="pmeta">on a computer, drag this to your bookmarks bar '
-            f'instead of steps 1-2.</span>',
-            unsafe_allow_html=True)
-        st.caption("Your cookies go straight from ESPN into your own private "
-                   "session — never stored on the server.")
+  <div style="margin-top:14px;padding-top:10px;border-top:1px solid #2a2a2a;">
+    <b>Every draft (the easy part):</b>
+    <ol style="margin:6px 0 0 18px;padding:0;">
+      <li>Open <b>fantasy.espn.com</b>, make sure you're logged in.</li>
+      <li>Tap your <b>Shredder</b> bookmark.</li>
+      <li>You land back here <b>already connected</b>. 🎸</li>
+    </ol>
+  </div>
+</div>
+<script>
+  var BM = {bm_js};
+  var ua = navigator.userAgent || "";
+  var isIOS = /iPhone|iPad|iPod/i.test(ua);
+  var isAnd = /Android/i.test(ua);
+  document.getElementById(isIOS?'ios':(isAnd?'android':'desktop')).style.display='block';
+  var dl = document.getElementById('dtlink'); if(dl) dl.setAttribute('href', BM);
+  var btn = document.getElementById('copybtn');
+  btn.addEventListener('click', function(){{
+    function ok(){{ document.getElementById('copied').style.display='block'; }}
+    try {{
+      if (navigator.clipboard && navigator.clipboard.writeText) {{
+        navigator.clipboard.writeText(BM).then(ok, function(){{ fallback(); }});
+      }} else {{ fallback(); }}
+    }} catch(e) {{ fallback(); }}
+    function fallback(){{
+      var t=document.createElement('textarea'); t.value=BM;
+      document.body.appendChild(t); t.select();
+      try{{ document.execCommand('copy'); ok(); }}catch(e){{ alert('Copy this:\\n\\n'+BM); }}
+      document.body.removeChild(t);
+    }}
+  }});
+</script>
+""", height=430)
 
 
 def _grade_team(players, cfg, scoring_key):
