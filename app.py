@@ -109,7 +109,8 @@ def _icon_data_uri(fname):
 
 st.set_page_config(page_title="Project Shredder", layout="wide",
                    page_icon=(_ICON if _os.path.exists(_ICON) else "🎸"),
-                   initial_sidebar_state="expanded")
+                   # "auto" = collapsed on phones (board first), expanded on desktop
+                   initial_sidebar_state="auto")
 
 
 def _inject_pwa():
@@ -293,6 +294,11 @@ st.markdown("""
   .bdg{font-size:10px !important;}
   /* sidebar is a drawer on mobile; widen its controls */
   section[data-testid="stSidebar"]{min-width:88vw !important;}
+  /* make the ☰ open-sidebar control big + obvious (it's the way to Setup) */
+  [data-testid="stSidebarCollapsedControl"]{
+    transform:scale(1.4); transform-origin:top left;
+    background:var(--accent) !important; border-radius:8px !important;}
+  [data-testid="stSidebarCollapsedControl"] svg{color:#06231a !important;}
   /* keep the phone-only hint visible, hide the desktop-only one */
   .only-desktop{display:none !important;}
 }
@@ -950,26 +956,40 @@ def _render_bookmarklet_setup():
     """Sidebar helper that hands a leaguemate the one-tap login bookmarklet."""
     base = _app_base_url()
     bm = _bookmarklet_js(base)
-    with st.sidebar.expander("📲 One-tap login (skip the typing)"):
-        st.caption(
-            "Set this up ONCE, then connect with a single tap — no finding or "
-            "typing cookies ever again.")
-        st.markdown(
-            "**On your phone (Chrome/Safari):**\n"
-            "1. Copy the code below.\n"
-            "2. Bookmark THIS page (any page). Edit that bookmark, rename it "
-            "**“Shredder login”**, and paste the code as its **URL**.\n"
-            "3. Go to **fantasy.espn.com** (logged in), open your bookmarks, tap "
-            "**Shredder login** — it opens Shredder already connected.")
+    with st.sidebar.expander("📲 One-tap login (set up once)", expanded=False):
+        st.markdown("**Step 1 — copy this code:**")
         st.code(bm, language="text")
-        # desktop convenience: a draggable link (drag to bookmarks bar)
+        st.caption("Tap the copy icon on the box above.")
+
+        st.markdown("**Step 2 — save it as a bookmark:**")
+        st.markdown(
+            "**iPhone (Safari):**\n"
+            "1. Tap the **Share** button → **Add Bookmark** → Save.\n"
+            "2. Tap the **book icon** → **Edit** → open that new bookmark.\n"
+            "3. Clear the address line, **paste** the copied code, name it "
+            "**Shredder** → Done.")
+        st.markdown(
+            "**Android (Chrome):**\n"
+            "1. Tap **⋮** → the **star** to bookmark this page.\n"
+            "2. Tap **⋮ → Bookmarks**, open the new one → **Edit** (pencil).\n"
+            "3. Replace the URL with the **pasted** code, name it **Shredder** "
+            "→ save.")
+
+        st.markdown("**Step 3 — use it (every draft):**")
+        st.markdown(
+            "1. Open **fantasy.espn.com** and make sure you're logged in.\n"
+            "2. In the address bar, type **Shredder** and tap the bookmark.\n"
+            "3. Shredder opens **already connected** — no typing. 🎸")
+
         st.markdown(
             f'<a href="{bm}" style="display:inline-block;padding:6px 12px;'
-            f'border:1px solid var(--accent);border-radius:8px;color:var(--accent);'
-            f'text-decoration:none;font-weight:700;">🔗 Shredder login</a> '
-            f'<span class="pmeta">(on a computer: drag this to your bookmarks bar)</span>',
+            f'margin-top:6px;border:1px solid var(--accent);border-radius:8px;'
+            f'color:var(--accent);text-decoration:none;font-weight:700;">'
+            f'🔗 Shredder login</a> '
+            f'<span class="pmeta">on a computer, drag this to your bookmarks bar '
+            f'instead of steps 1-2.</span>',
             unsafe_allow_html=True)
-        st.caption("Your cookies go straight from ESPN to your own Shredder "
+        st.caption("Your cookies go straight from ESPN into your own private "
                    "session — never stored on the server.")
 
 
