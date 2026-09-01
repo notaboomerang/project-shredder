@@ -70,6 +70,31 @@ import os as _os
 import base64 as _b64
 
 _ASSETS = _os.path.join(_os.path.dirname(__file__), "assets")
+
+
+def _detect_cloud() -> bool:
+    """True when running on a shared/hosted server (Streamlit Community Cloud
+    etc.), False on your local desktop. On the cloud we must isolate every user
+    to their own browser session (no shared cookie/league files); on desktop we
+    keep the existing single-user file behavior. Signals, any of which = cloud:
+      • an explicit IS_CLOUD=1 env var or secret (you can force it),
+      • the app is running from Streamlit Cloud's mount path (/mount/src/...),
+      • common hosted-env markers.
+    Kept deliberately conservative so it NEVER misfires on the desktop."""
+    try:
+        if str(_os.environ.get("IS_CLOUD", "")).strip() in ("1", "true", "yes"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    if here.startswith("/mount/src") or here.startswith("/app"):
+        return True   # Streamlit Community Cloud / many PaaS containers
+    if _os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud":
+        return True
+    return False
+
+
+IS_CLOUD = _detect_cloud()
 _ICON = _os.path.join(_ASSETS, "shredder_icon.png")
 
 
@@ -304,32 +329,66 @@ def _init_state():
     ss.setdefault("_manual_tendencies", {})  # {slot: {tendencies, rookie_averse}}
     ss.setdefault("_cookie_loaded", False)
     if not ss._cookie_loaded:
-        # CLOUD path: read ESPN cookies from st.secrets when present (Streamlit
-        # Community Cloud etc.). This is additive — on the DESKTOP there are no
-        # secrets, so it falls straight through to the existing file/browser
-        # auto-load below and nothing changes.
-        try:
-            _sec = st.secrets.get("espn", {}) if hasattr(st, "secrets") else {}
-            _s2 = _sec.get("espn_s2", "") or st.secrets.get("espn_s2", "")
-            _swid = _sec.get("swid", "") or st.secrets.get("swid", "")
-            if _s2 or _swid:
-                ss.espn_s2, ss.espn_swid = _s2, _swid
-                ss["_cookie_source"] = "secrets"
-        except Exception:  # noqa: BLE001 — no secrets configured (desktop) is fine
-            pass
-        # DESKTOP path (unchanged): saved file, then browser auto-read.
-        if not (ss.espn_s2 or ss.espn_swid) and SEC is not None:
+        if IS_CLOUD:
+            # MULTI-USER CLOUD: each visitor logs in with THEIR OWN cookies, held
+            # only in their browser session. We do NOT auto-load anything here —
+            # not the shared cookie file (would be another user's login) and not
+            # a single-owner st.secrets set — so everyone starts blank and pastes
+            # their own. (A single-owner deploy can still force cookies by setting
+            # the OWNER_COOKIES secret; off by default for the public app.)
             try:
-                s2, swid, _src = SEC.auto_load()
-                if s2 or swid:
-                    ss.espn_s2, ss.espn_swid = s2, swid
+                if hasattr(st, "secrets") and st.secrets.get("owner_cookies"):
+                    _sec = st.secrets.get("espn", {})
+                    ss.espn_s2 = _sec.get("espn_s2", "") or st.secrets.get("espn_s2", "")
+                    ss.espn_swid = _sec.get("swid", "") or st.secrets.get("swid", "")
+                    if ss.espn_s2 or ss.espn_swid:
+                        ss["_cookie_source"] = "secrets"
             except Exception:  # noqa: BLE001
                 pass
+        else:
+            # DESKTOP (unchanged): saved cookie file, then browser auto-read.
+            if SEC is not None:
+                try:
+                    s2, swid, _src = SEC.auto_load()
+                    if s2 or swid:
+                        ss.espn_s2, ss.espn_swid = s2, swid
+                        ss["_cookie_source"] = _src
+                except Exception:  # noqa: BLE001
+                    pass
         ss._cookie_loaded = True
 
 
 _init_state()
 ss = st.session_state
+
+
+def _saved_leagues_load():
+    """Saved leagues list. On the DESKTOP this is the shared file (SL.load); on
+    the multi-user CLOUD it's per-session (st.session_state) so one visitor's
+    discovered leagues never show up for another."""
+    if IS_CLOUD:
+        return list(st.session_state.get("_my_leagues", []))
+    try:
+        return SL.load() if SL else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _saved_leagues_upsert(leagues):
+    """Store discovered leagues. Cloud -> session only; desktop -> shared file."""
+    if IS_CLOUD:
+        cur = {int(e["league_id"]): e for e in st.session_state.get("_my_leagues", [])
+               if str(e.get("league_id")).isdigit()}
+        for d in leagues or []:
+            if str(d.get("league_id")).isdigit():
+                cur[int(d["league_id"])] = d
+        st.session_state["_my_leagues"] = list(cur.values())
+        return
+    try:
+        if SL:
+            SL.bulk_upsert(leagues)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _password_gate():
@@ -1018,7 +1077,10 @@ elif mode == "ESPN":
         st.sidebar.error("ESPN client unavailable (install `requests`).")
     else:
         have_ck = bool(ss.espn_s2 and ss.espn_swid)
-        if not have_ck and ELOGIN is not None:
+        # DESKTOP-only: the ESPN login popup opens a real browser window, which
+        # can't happen on a headless server. On the CLOUD everyone pastes their
+        # own cookies (below), kept only in their private session.
+        if not IS_CLOUD and not have_ck and ELOGIN is not None:
             if st.sidebar.button("🔐 Log in to ESPN", use_container_width=True):
                 with st.spinner("Opening ESPN login window…"):
                     r = ELOGIN.login()
@@ -1029,24 +1091,41 @@ elif mode == "ESPN":
                     st.rerun()
                 else:
                     st.sidebar.error("Login didn't complete.")
-        with st.sidebar.expander("Cookies (advanced)", expanded=not have_ck):
+        if IS_CLOUD and not have_ck:
+            st.sidebar.markdown("**Connect your ESPN account**")
+            st.sidebar.caption(
+                "Paste your two ESPN cookies below (they stay private to your "
+                "session — never saved on the server). To get them: on a computer "
+                "logged into fantasy.espn.com, open DevTools (F12) → Application → "
+                "Cookies → fantasy.espn.com → copy `espn_s2` and `SWID`.")
+        with st.sidebar.expander("ESPN cookies (espn_s2 + SWID)", expanded=not have_ck):
             s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2)
             swid = st.text_input("SWID", type="password", value=ss.espn_swid)
-            if st.button("Save cookies"):
+            if st.button("Use these cookies"):
                 ss.espn_s2, ss.espn_swid = s2, swid
-                if SEC:
+                # persist to disk ONLY on the desktop (single user). On the cloud
+                # keep them session-only so users never share a cookie file.
+                if not IS_CLOUD and SEC:
                     SEC.save_file(s2, swid)
                 st.rerun()
+            if have_ck and st.button("Forget cookies"):
+                ss.espn_s2 = ss.espn_swid = ""
+                ss["_my_leagues"] = []
+                if not IS_CLOUD and SEC:
+                    try:
+                        SEC.forget()
+                    except Exception:  # noqa: BLE001
+                        pass
+                st.rerun()
 
-        # ---- auto-discover: on draft day, just log in and pick your league ----
-        _saved = SL.load() if SL else []
+        # ---- auto-discover: paste cookies, then pick your league ----
+        _saved = _saved_leagues_load()
         if have_ck and st.sidebar.button("🔎 Find my leagues",
                                          use_container_width=True):
             with st.spinner("Asking ESPN for your leagues…"):
                 res = EC.discover_leagues(ss.espn_s2, ss.espn_swid)
             if res.get("ok") and res.get("leagues"):
-                if SL:
-                    SL.bulk_upsert(res["leagues"])
+                _saved_leagues_upsert(res["leagues"])
                 ss.espn_status = res["message"]
                 st.rerun()
             else:
