@@ -508,6 +508,13 @@ def _record_pick(cfg, name, position, mine, opps, advance=True):
     mode, after MY pick the bots draft forward to my next turn automatically."""
     if name in ss.drafted:
         return
+    # HARD STOP at the end of the draft: teams * rounds picks total. Without this
+    # the board kept accepting picks into a phantom 17th round (Your Players 17 in
+    # a 16-round league) and the late-round gates (dark horse fires near your LAST
+    # pick) never resolved. Once complete, no more picks are recorded.
+    _total = int(cfg.teams) * int(cfg.rounds)
+    if int(ss.current_overall) > _total:
+        return
     _push_undo()
     ov = int(ss.current_overall)
     slot = O._snake_slot(ov, int(cfg.teams))
@@ -520,11 +527,14 @@ def _record_pick(cfg, name, position, mine, opps, advance=True):
         # stashed so it survives the rerun and shows on the board.
         ss["_last_trash"] = CO.trash_talk(name)
     ss.current_overall = ov + 1
-    if advance and mine and ss.get("mock_on"):
+    if advance and mine and ss.get("mock_on") and ss.current_overall <= _total:
         r = MOCK.bots_pick_until_me(pool, cfg, ss.drafted, ss.team_rosters,
                                     int(ss.current_overall), opponents=opps,
                                     pick_log=ss.pick_log)
         ss.current_overall = r["now_overall"]
+    # never let the counter run past the final pick + 1 (the 'complete' sentinel)
+    if ss.current_overall > _total:
+        ss.current_overall = _total + 1
 
 
 def _mark_gone(cfg, name, opps):
@@ -880,6 +890,115 @@ def _render_insights(insights, cfg, opps):
                 st.rerun()
 
 
+def _grade_team(players, cfg, scoring_key):
+    """Grade one drafted team A+..F on (a) total projected value and (b) roster
+    construction (did they fill starters without wasting picks). `players` =
+    list of (name, position). Returns (letter, score0_100, note)."""
+    import engine as E
+    counts = {}
+    total_proj = 0.0
+    for nm, pos in players:
+        counts[pos] = counts.get(pos, 0) + 1
+        raw = name_to_raw.get(nm)
+        if raw:
+            total_proj += E.project_points(raw.stats, cfg.scoring)
+    s = cfg.starters
+
+    # construction score: reward covering each starting slot, penalize gaps and
+    # extreme hoarding (e.g. 4 QBs) that wasted picks.
+    con = 100.0
+    need = {"QB": s.get("QB", 1), "RB": s.get("RB", 2), "WR": s.get("WR", 2),
+            "TE": s.get("TE", 1), "DST": s.get("DST", 1), "K": s.get("K", 1)}
+    for p, want in need.items():
+        have = counts.get(p, 0)
+        if have < want:
+            con -= 18 * (want - have)          # missing a starter hurts a lot
+    # flex coverage (need at least starters + flex worth of RB/WR/TE)
+    flex_need = s.get("RB", 2) + s.get("WR", 2) + s.get("TE", 1) + s.get("FLEX", 1)
+    if counts.get("RB", 0) + counts.get("WR", 0) + counts.get("TE", 0) < flex_need:
+        con -= 12
+    # hoarding single-slot positions = wasted capital
+    for p in ("QB", "TE", "DST", "K"):
+        over = counts.get(p, 0) - max(1, s.get(p, 1)) - 1
+        if over > 0:
+            con -= 6 * over
+    con = max(0.0, min(100.0, con))
+
+    return total_proj, con, counts
+
+
+def _render_draft_summary(cfg, scoring_key):
+    """End-of-draft board: every team graded A+..F, yours highlighted. Grades
+    blend total projected points (value) with roster construction (did you build
+    a legal, balanced starting lineup)."""
+    st.success("🏁 **Draft complete!** Here's how every team's roster grades out.")
+
+    teams_n = int(cfg.teams)
+    # collect each team's players from team_rosters (slot -> [names])
+    graded = []
+    for slot in range(1, teams_n + 1):
+        names = ss.team_rosters.get(slot, [])
+        players = [(nm, name_to_raw[nm].position) for nm in names
+                   if nm in name_to_raw]
+        proj, con, counts = _grade_team(players, cfg, scoring_key)
+        graded.append({"slot": slot, "players": players, "proj": proj,
+                       "con": con, "counts": counts})
+
+    # normalize projected points to 0-100 across the league (relative value)
+    projs = [g["proj"] for g in graded] or [0]
+    lo, hi = min(projs), max(projs)
+    span = (hi - lo) or 1.0
+    for g in graded:
+        value_score = 100.0 * (g["proj"] - lo) / span
+        # blend: 60% value vs the room, 40% construction
+        g["score"] = round(0.6 * value_score + 0.4 * g["con"], 1)
+
+    def _letter(score):
+        for cut, lt in [(93, "A+"), (88, "A"), (83, "A-"), (78, "B+"), (73, "B"),
+                        (68, "B-"), (63, "C+"), (58, "C"), (53, "C-"),
+                        (45, "D"), (0, "F")]:
+            if score >= cut:
+                return lt
+        return "F"
+
+    # rank best-to-worst
+    graded.sort(key=lambda g: g["score"], reverse=True)
+    my_slot = int(cfg.draft_slot)
+
+    for rank, g in enumerate(graded, 1):
+        mine = g["slot"] == my_slot
+        who = (opps.profiles[g["slot"]].name
+               if g["slot"] in opps.profiles and opps.profiles[g["slot"]].name
+               else f"Team (slot {g['slot']})")
+        letter = _letter(g["score"])
+        mix = " · ".join(f"{p}{g['counts'].get(p,0)}"
+                         for p in ("QB", "RB", "WR", "TE", "DST", "K")
+                         if g["counts"].get(p, 0))
+        border = "var(--accent)" if mine else "var(--line)"
+        tag = ' <span class="mine-tag">YOU</span>' if mine else ""
+        with st.container(border=True):
+            c = st.columns([0.7, 3.4, 1.0])
+            c[0].markdown(f'<div style="font:800 26px \'JetBrains Mono\',monospace;'
+                          f'color:var(--accent);text-align:center;">{letter}</div>',
+                          unsafe_allow_html=True)
+            c[1].markdown(
+                f'<div><b>#{rank} · {who}</b>{tag}</div>'
+                f'<div class="pmeta">{mix}</div>', unsafe_allow_html=True)
+            c[2].markdown(f'<div class="pmeta" style="text-align:right;">score '
+                          f'{g["score"]:.0f}<br>proj {g["proj"]:.0f}</div>',
+                          unsafe_allow_html=True)
+            if mine:
+                with st.expander("Your full roster"):
+                    for nm, pos in sorted(g["players"], key=lambda x: x[1]):
+                        st.markdown(f'<span class="pill pos-{pos}">{pos}</span> '
+                                    f'{nm}', unsafe_allow_html=True)
+
+    st.divider()
+    if st.button("🔄 Start a new draft"):
+        _reset_board()
+        st.rerun()
+
+
 def _render_rivals_forecast(cfg, opps, loyalty_by_slot):
     """Crystal ball: predict what each opponent between now and your next pick
     will take, and flag which top players are likely to SURVIVE to you. This is
@@ -1232,23 +1351,27 @@ recs = X.recommend(pool, cfg, roster, set(ss.drafted),
 
 # whose turn / timing
 ov = int(ss.current_overall)
-on_clock_slot = O._snake_slot(ov, int(teams))
-is_my_turn = (on_clock_slot == int(slot))
+total_picks = int(teams) * int(rounds)
+draft_complete = ov > total_picks
+on_clock_slot = O._snake_slot(min(ov, total_picks), int(teams))
+is_my_turn = (not draft_complete) and (on_clock_slot == int(slot))
 my_picks = cfg.my_overall_picks()
-next_pick = next((p for p in my_picks if p >= ov), None)
+next_pick = next((p for p in my_picks if p >= ov and p <= total_picks), None)
 picks_until = (next_pick - ov) if next_pick else 0
-rnd_now = (ov - 1) // int(teams) + 1
+rnd_now = min((ov - 1) // int(teams) + 1, int(rounds))
 
 
 # --------------------------------------------------------------------------- header
 st.caption(f"🏈 {scoring_label} · {teams}-team · your slot {slot}")
 
 hc = st.columns([1, 1, 1, 1])
-hc[0].metric("On the clock", f"#{ov}")
-hc[1].metric("Round", rnd_now)
-hc[2].metric("Your next pick", f"#{next_pick}" if next_pick else "—",
-             "NOW" if is_my_turn else (f"in {picks_until}" if picks_until else "—"))
-hc[3].metric("Your players", len(_mine))
+hc[0].metric("On the clock", "DONE" if draft_complete else f"#{ov}")
+hc[1].metric("Round", f"{rnd_now}/{int(rounds)}")
+hc[2].metric("Your next pick",
+             "—" if (draft_complete or not next_pick) else f"#{next_pick}",
+             "DONE" if draft_complete else
+             ("NOW" if is_my_turn else (f"in {picks_until}" if picks_until else "—")))
+hc[3].metric("Your players", f"{len(_mine)}/{int(rounds)}")
 
 # top-level view switch: live draft board · full rankings cheat sheet · weekly start/sit
 _view = st.radio("View",
@@ -1421,6 +1544,12 @@ if _view == "📋 Rankings guide":
 
 if _view == "📅 Weekly lineup":
     _render_weekly_lineup()
+    st.stop()
+
+
+# ---- DRAFT COMPLETE: stop the board, show the graded summary ----
+if draft_complete:
+    _render_draft_summary(cfg, scoring_key)
     st.stop()
 
 
