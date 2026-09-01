@@ -328,6 +328,31 @@ def _init_state():
     ss.setdefault("dna_seasons", "2021,2022,2023,2024,2025")
     ss.setdefault("_manual_tendencies", {})  # {slot: {tendencies, rookie_averse}}
     ss.setdefault("_cookie_loaded", False)
+
+    # ONE-TAP LOGIN via bookmarklet: if the app was opened with cookies in the
+    # URL (?espn_s2=...&swid=...), pull them into the session and immediately
+    # scrub them from the address bar so they don't linger in history/screenshots.
+    # This is how leaguemates connect on their phone with a single tap — no typing.
+    try:
+        _qp = st.query_params
+        _qs2 = _qp.get("espn_s2", "")
+        _qsw = _qp.get("swid", "")
+        if _qs2 or _qsw:
+            import urllib.parse as _up
+            ss.espn_s2 = _up.unquote(_qs2) if _qs2 else ss.get("espn_s2", "")
+            ss.espn_swid = _up.unquote(_qsw) if _qsw else ss.get("espn_swid", "")
+            ss["_cookie_source"] = "bookmarklet"
+            ss["_cookie_loaded"] = True
+            # remove the secrets from the URL right away
+            try:
+                for _k in ("espn_s2", "swid"):
+                    if _k in _qp:
+                        del _qp[_k]
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
     if not ss._cookie_loaded:
         if IS_CLOUD:
             # MULTI-USER CLOUD: each visitor logs in with THEIR OWN cookies, held
@@ -890,41 +915,118 @@ def _render_insights(insights, cfg, opps):
                 st.rerun()
 
 
+def _app_base_url():
+    """Best-effort public base URL of THIS app, for building the bookmarklet.
+    Prefers an explicit APP_URL secret; else a sensible default."""
+    try:
+        if hasattr(st, "secrets"):
+            u = st.secrets.get("app_url", "")
+            if u:
+                return u.rstrip("/")
+    except Exception:  # noqa: BLE001
+        pass
+    return "https://shreddies.streamlit.app"
+
+
+def _bookmarklet_js(base_url):
+    """A one-line bookmarklet: run it while on fantasy.espn.com and it reads
+    ESPN's own cookies (same-origin, allowed) and opens Shredder with them in
+    the URL so the app auto-connects. No typing, nothing to install."""
+    # reads document.cookie for espn_s2 + SWID, URL-encodes, opens the app.
+    return (
+        "javascript:(function(){"
+        "var c=document.cookie,m={};c.split(';').forEach(function(p){"
+        "var i=p.indexOf('=');if(i>0){m[p.slice(0,i).trim()]=p.slice(i+1).trim();}});"
+        "var s2=m['espn_s2'],sw=m['SWID']||m['swid'];"
+        "if(!s2||!sw){alert('Not logged into ESPN here. Open fantasy.espn.com, "
+        "log in, then tap this again.');return;}"
+        f"var u='{base_url}/?espn_s2='+encodeURIComponent(s2)+'&swid='+encodeURIComponent(sw);"
+        "window.open(u,'_blank');"
+        "})();"
+    )
+
+
+def _render_bookmarklet_setup():
+    """Sidebar helper that hands a leaguemate the one-tap login bookmarklet."""
+    base = _app_base_url()
+    bm = _bookmarklet_js(base)
+    with st.sidebar.expander("📲 One-tap login (skip the typing)"):
+        st.caption(
+            "Set this up ONCE, then connect with a single tap — no finding or "
+            "typing cookies ever again.")
+        st.markdown(
+            "**On your phone (Chrome/Safari):**\n"
+            "1. Copy the code below.\n"
+            "2. Bookmark THIS page (any page). Edit that bookmark, rename it "
+            "**“Shredder login”**, and paste the code as its **URL**.\n"
+            "3. Go to **fantasy.espn.com** (logged in), open your bookmarks, tap "
+            "**Shredder login** — it opens Shredder already connected.")
+        st.code(bm, language="text")
+        # desktop convenience: a draggable link (drag to bookmarks bar)
+        st.markdown(
+            f'<a href="{bm}" style="display:inline-block;padding:6px 12px;'
+            f'border:1px solid var(--accent);border-radius:8px;color:var(--accent);'
+            f'text-decoration:none;font-weight:700;">🔗 Shredder login</a> '
+            f'<span class="pmeta">(on a computer: drag this to your bookmarks bar)</span>',
+            unsafe_allow_html=True)
+        st.caption("Your cookies go straight from ESPN to your own Shredder "
+                   "session — never stored on the server.")
+
+
 def _grade_team(players, cfg, scoring_key):
-    """Grade one drafted team A+..F on (a) total projected value and (b) roster
-    construction (did they fill starters without wasting picks). `players` =
-    list of (name, position). Returns (letter, score0_100, note)."""
+    """Grade one drafted team on (a) total projected value and (b) roster
+    construction, and collect plain-English reasons for the grade. `players` =
+    list of (name, position). Returns dict:
+      proj, con (construction 0-100), counts, top3 (best players by proj),
+      pos_reasons (list of 'why' fragments: wins + misses)."""
     import engine as E
     counts = {}
     total_proj = 0.0
+    by_proj = []
     for nm, pos in players:
         counts[pos] = counts.get(pos, 0) + 1
         raw = name_to_raw.get(nm)
-        if raw:
-            total_proj += E.project_points(raw.stats, cfg.scoring)
+        pp = E.project_points(raw.stats, cfg.scoring) if raw else 0.0
+        total_proj += pp
+        by_proj.append((nm, pos, pp))
+    by_proj.sort(key=lambda x: x[2], reverse=True)
     s = cfg.starters
 
-    # construction score: reward covering each starting slot, penalize gaps and
-    # extreme hoarding (e.g. 4 QBs) that wasted picks.
     con = 100.0
+    wins, misses = [], []
     need = {"QB": s.get("QB", 1), "RB": s.get("RB", 2), "WR": s.get("WR", 2),
             "TE": s.get("TE", 1), "DST": s.get("DST", 1), "K": s.get("K", 1)}
+    gaps = []
     for p, want in need.items():
         have = counts.get(p, 0)
         if have < want:
-            con -= 18 * (want - have)          # missing a starter hurts a lot
-    # flex coverage (need at least starters + flex worth of RB/WR/TE)
+            con -= 18 * (want - have)
+            gaps.append(f"{want - have} {p}")
+    if gaps:
+        misses.append("short at " + ", ".join(gaps))
+    else:
+        wins.append("all starters filled")
+
     flex_need = s.get("RB", 2) + s.get("WR", 2) + s.get("TE", 1) + s.get("FLEX", 1)
-    if counts.get("RB", 0) + counts.get("WR", 0) + counts.get("TE", 0) < flex_need:
+    skill = counts.get("RB", 0) + counts.get("WR", 0) + counts.get("TE", 0)
+    if skill < flex_need:
         con -= 12
-    # hoarding single-slot positions = wasted capital
+        misses.append("thin FLEX/skill depth")
+    elif skill >= flex_need + 3:
+        wins.append("deep skill-position bench")
+
+    hoarded = []
     for p in ("QB", "TE", "DST", "K"):
         over = counts.get(p, 0) - max(1, s.get(p, 1)) - 1
         if over > 0:
             con -= 6 * over
+            hoarded.append(f"{counts.get(p,0)} {p}")
+    if hoarded:
+        misses.append("over-invested: " + ", ".join(hoarded))
     con = max(0.0, min(100.0, con))
 
-    return total_proj, con, counts
+    return {"proj": total_proj, "con": con, "counts": counts,
+            "top3": by_proj[:3], "wins": wins, "misses": misses}
 
 
 def _render_draft_summary(cfg, scoring_key):
@@ -1213,11 +1315,19 @@ elif mode == "ESPN":
         if IS_CLOUD and not have_ck:
             st.sidebar.markdown("**Connect your ESPN account**")
             st.sidebar.caption(
-                "Paste your two ESPN cookies below (they stay private to your "
-                "session — never saved on the server). To get them: on a computer "
-                "logged into fantasy.espn.com, open DevTools (F12) → Application → "
-                "Cookies → fantasy.espn.com → copy `espn_s2` and `SWID`.")
-        with st.sidebar.expander("ESPN cookies (espn_s2 + SWID)", expanded=not have_ck):
+                "Easiest: use the one-tap login below (no typing). Or paste your "
+                "two ESPN cookies manually. Either way they stay private to your "
+                "session — never saved on the server.")
+        # ONE-TAP: the bookmarklet (primary path on the phone; also shows on
+        # desktop). Only relevant on the hosted app.
+        if IS_CLOUD:
+            _render_bookmarklet_setup()
+        with st.sidebar.expander("…or paste cookies manually (espn_s2 + SWID)",
+                                 expanded=(not have_ck and not IS_CLOUD)):
+            if IS_CLOUD:
+                st.caption("To find them: on a computer logged into "
+                           "fantasy.espn.com, DevTools (F12) → Application → "
+                           "Cookies → copy `espn_s2` and `SWID`.")
             s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2)
             swid = st.text_input("SWID", type="password", value=ss.espn_swid)
             if st.button("Use these cookies"):
