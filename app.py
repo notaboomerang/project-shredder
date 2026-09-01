@@ -294,11 +294,14 @@ st.markdown("""
   .bdg{font-size:10px !important;}
   /* sidebar is a drawer on mobile; widen its controls */
   section[data-testid="stSidebar"]{min-width:88vw !important;}
-  /* make the ☰ open-sidebar control big + obvious (it's the way to Setup) */
+  /* highlight the native open-sidebar control so it's easy to find/tap — but
+     DON'T transform/scale it (that can clip or misposition the tap target and
+     block reaching Setup on some Streamlit builds). Just tint + enlarge hit area. */
   [data-testid="stSidebarCollapsedControl"]{
-    transform:scale(1.4); transform-origin:top left;
-    background:var(--accent) !important; border-radius:8px !important;}
-  [data-testid="stSidebarCollapsedControl"] svg{color:#06231a !important;}
+    background:var(--accent) !important; border-radius:8px !important;
+    padding:2px !important;}
+  [data-testid="stSidebarCollapsedControl"] svg,
+  [data-testid="stSidebarCollapsedControl"] button svg{color:#06231a !important;}
   /* keep the phone-only hint visible, hide the desktop-only one */
   .only-desktop{display:none !important;}
 }
@@ -478,11 +481,19 @@ def _render_masthead():
     st.markdown(
         """
 <button class="only-mobile shredder-setup-btn" onclick="
-  var d=window.parent.document;
-  var t=d.querySelector('[data-testid=\\'stSidebarCollapsedControl\\'] button')
-     || d.querySelector('[data-testid=\\'stSidebarCollapsedControl\\']')
-     || d.querySelector('[data-testid=\\'baseButton-headerNoPadding\\']');
-  if(t){t.click();}
+  try{
+    var d=window.parent&amp;&amp;window.parent.document?window.parent.document:document;
+    var sels=['[data-testid=\\'stSidebarCollapsedControl\\'] button',
+              '[data-testid=\\'stSidebarCollapsedControl\\']',
+              '[data-testid=\\'stExpandSidebarButton\\']',
+              '[aria-label=\\'Open sidebar\\']',
+              '[data-testid=\\'collapsedControl\\'] button',
+              '[data-testid=\\'baseButton-headerNoPadding\\']'];
+    var t=null;
+    for(var i=0;i&lt;sels.length;i++){t=d.querySelector(sels[i]);if(t){break;}}
+    if(t){t.click();}
+    else{alert('Tap the small arrow at the very top-left to open Setup.');}
+  }catch(e){}
 ">☰  Setup / Connect ESPN</button>
 <style>
 .shredder-setup-btn{display:none;}
@@ -496,6 +507,27 @@ def _render_masthead():
 
 
 _render_masthead()
+
+
+def _render_mobile_mode_picker():
+    """Phone-only: pick Mock / Manual / ESPN right on the main page, so the mode
+    is ALWAYS reachable even if the sidebar drawer is hard to open on mobile.
+    Writes ss.mode; the sidebar radio reads the same value. Hidden on desktop."""
+    st.markdown('<div class="only-mobile">', unsafe_allow_html=True)
+    _cur = st.session_state.get("mode", "Mock")
+    _opts = ["Mock", "Manual", "ESPN"]
+    pick = st.radio("How are you drafting?", _opts,
+                    index=_opts.index(_cur if _cur in _opts else "Mock"),
+                    horizontal=True, key="mobile_mode_radio")
+    if pick != _cur:
+        st.session_state["mode"] = pick
+        # keep the sidebar widget in sync so they never disagree
+        st.session_state["mode_radio"] = pick
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+_render_mobile_mode_picker()
 
 
 @st.cache_data(show_spinner="Building rankings…")
@@ -1240,9 +1272,10 @@ def _render_recent_picks(limit=10):
 # --------------------------------------------------------------------------- sidebar
 st.sidebar.title("🎸 SHREDDER")
 
-mode = st.sidebar.radio("How are you drafting?",
-                        ["Mock", "Manual", "ESPN"],
-                        index=["Mock", "Manual", "ESPN"].index(ss.mode),
+_MODES = ["Mock", "Manual", "ESPN"]
+mode = st.sidebar.radio("How are you drafting?", _MODES,
+                        index=_MODES.index(ss.mode if ss.mode in _MODES else "Mock"),
+                        key="mode_radio",
                         help="Mock = practice vs bots · Manual = you enter every "
                              "pick · ESPN = sync live from your league.")
 ss.mode = mode
