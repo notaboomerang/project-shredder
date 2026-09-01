@@ -337,24 +337,61 @@ def _init_state():
     ss.setdefault("dna_seasons", "2021,2022,2023,2024,2025")
     ss.setdefault("_manual_tendencies", {})  # {slot: {tendencies, rookie_averse}}
     ss.setdefault("_cookie_loaded", False)
+    ss.setdefault("peek_mode", False)        # read-only phone mirror of a live draft
+    ss.setdefault("_peek_league", "")        # league id carried in the peek link
+    ss.setdefault("_peek_season", 0)         # season carried in the peek link
+    ss.setdefault("_peek_slot", 0)           # your draft slot carried in the peek link
+    ss.setdefault("_peek_teams", 0)          # league size carried in the peek link
+    ss.setdefault("_peek_rounds", 0)         # rounds carried in the peek link
+    ss.setdefault("_peek_scoring", "")       # scoring key carried in the peek link
 
     # ONE-TAP LOGIN via bookmarklet: if the app was opened with cookies in the
     # URL (?espn_s2=...&swid=...), pull them into the session and immediately
     # scrub them from the address bar so they don't linger in history/screenshots.
     # This is how leaguemates connect on their phone with a single tap — no typing.
+    #
+    # PEEK LINK: the desktop "Open on my phone" link adds ?peek=1&league=&season=
+    # &slot= alongside the cookies. When present we flip into read-only peek mode
+    # and remember the league so we can auto-connect and just mirror the picks.
     try:
         _qp = st.query_params
         _qs2 = _qp.get("espn_s2", "")
         _qsw = _qp.get("swid", "")
-        if _qs2 or _qsw:
+        _qpeek = _qp.get("peek", "")
+        _qleague = _qp.get("league", "")
+        _qseason = _qp.get("season", "")
+        _qslot = _qp.get("slot", "")
+        _qteams = _qp.get("teams", "")
+        _qrounds = _qp.get("rounds", "")
+        _qscoring = _qp.get("scoring", "")
+        if _qs2 or _qsw or _qpeek:
             import urllib.parse as _up
-            ss.espn_s2 = _up.unquote(_qs2) if _qs2 else ss.get("espn_s2", "")
-            ss.espn_swid = _up.unquote(_qsw) if _qsw else ss.get("espn_swid", "")
-            ss["_cookie_source"] = "bookmarklet"
+            if _qs2:
+                ss.espn_s2 = _up.unquote(_qs2)
+            if _qsw:
+                ss.espn_swid = _up.unquote(_qsw)
+            if _qs2 or _qsw:
+                ss["_cookie_source"] = "peek" if _qpeek else "bookmarklet"
             ss["_cookie_loaded"] = True
-            # remove the secrets from the URL right away
+            if _qpeek in ("1", "true", "yes"):
+                ss.peek_mode = True
+                ss.mode = "ESPN"
+                if str(_qleague).strip().isdigit():
+                    ss["_peek_league"] = str(_qleague).strip()
+                if str(_qseason).strip().isdigit():
+                    ss["_peek_season"] = int(_qseason)
+                if str(_qslot).strip().isdigit():
+                    ss["_peek_slot"] = int(_qslot)
+                if str(_qteams).strip().isdigit():
+                    ss["_peek_teams"] = int(_qteams)
+                if str(_qrounds).strip().isdigit():
+                    ss["_peek_rounds"] = int(_qrounds)
+                if _qscoring:
+                    ss["_peek_scoring"] = _up.unquote(_qscoring)
+            # remove the secrets (and peek params) from the URL right away
             try:
-                for _k in ("espn_s2", "swid"):
+                for _k in ("espn_s2", "swid", "peek", "league", "season", "slot",
+                           "teams", "rounds", "scoring"):
                     if _k in _qp:
                         del _qp[_k]
             except Exception:  # noqa: BLE001
@@ -527,7 +564,14 @@ def _render_mobile_mode_picker():
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-_render_mobile_mode_picker()
+if not st.session_state.get("peek_mode"):
+    _render_mobile_mode_picker()
+else:
+    # Peek mode is a clean, read-only mirror — hide the sidebar entirely so the
+    # phone is just the board. Nothing to configure here.
+    st.markdown("<style>[data-testid='stSidebar']{display:none !important;}"
+                "[data-testid='collapsedControl']{display:none !important;}</style>",
+                unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner="Building rankings…")
@@ -780,6 +824,16 @@ def _apply_dna_to_opponents(opps):
     return loyalty_by_slot
 
 
+def _is_live_runtime():
+    """True only under a real Streamlit server (not the AppTest harness). Used to
+    gate the peek auto-refresh loop so tests don't spin forever."""
+    try:
+        from streamlit import runtime as _rt
+        return _rt.exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _sync_espn(cfg, force=False):
     """Pull the live draft state from ESPN and fold every pick into the board."""
     if not ss.espn:
@@ -960,7 +1014,7 @@ def _render_insights(insights, cfg, opps):
             f'<div class="ib">{ins["body"]}</div></div>',
             unsafe_allow_html=True)
         player = ins.get("player")
-        if player and player not in ss.drafted:
+        if player and player not in ss.drafted and not ss.get("peek_mode"):
             bc = st.columns([1, 1, 4])
             if bc[0].button(f"✓ Draft {player.split()[-1]}",
                             key=f"ins_draft_{ins['kind']}_{i}",
@@ -1019,6 +1073,80 @@ def _render_bookmarklet_setup():
 def _render_bookmarklet_setup_main():
     """Same one-tap setup, rendered on the MAIN page (for the phone connect panel)."""
     _render_bookmarklet_body(st)
+
+
+def _peek_url(cfg):
+    """Build the 'open on my phone' peek link for the CURRENTLY connected league.
+    Carries the read-only cookies + league shape so the phone auto-connects and
+    mirrors this exact draft. Returns '' if we're not connected."""
+    if not ss.get("espn"):
+        return ""
+    import urllib.parse as _up
+    base = _app_base_url()
+    try:
+        _lid = int(getattr(ss.espn, "league_id", 0))
+        _seas = int(getattr(ss.espn, "season", 2026))
+    except Exception:  # noqa: BLE001
+        return ""
+    params = {
+        "peek": "1",
+        "espn_s2": ss.espn_s2 or "",
+        "swid": ss.espn_swid or "",
+        "league": str(_lid),
+        "season": str(_seas),
+        "slot": str(int(cfg.draft_slot)),
+        "teams": str(int(cfg.teams)),
+        "rounds": str(int(cfg.rounds)),
+        "scoring": ss.get("_scoring_key_for_peek", "") or "",
+    }
+    return base + "/?" + _up.urlencode(params)
+
+
+def _render_peek_share(cfg, container):
+    """Render the 'Open on my phone' QR + link for the connected league. The QR is
+    generated in-browser (tiny JS lib) so we add no Python dependency and it works
+    on the cloud. Scanning it opens Shredder on the phone already connected, in
+    read-only peek mode, auto-refreshing the live picks."""
+    url = _peek_url(cfg)
+    if not url:
+        return
+    import json as _json
+    import streamlit.components.v1 as _components
+    url_js = _json.dumps(url)
+    with container.expander("📱 Open on my phone (read-only peek)", expanded=False):
+        st.caption("Scan this with your phone camera. Shredder opens on the phone "
+                   "already connected to THIS draft — read-only, auto-refreshing. "
+                   "Draft on your computer; glance at the phone for the pick.")
+        _components.html(f"""
+<div style="font:13px -apple-system,Segoe UI,Roboto,sans-serif;color:#e6e6e6;text-align:center;">
+  <div id="qr" style="display:inline-block;background:#fff;padding:10px;border-radius:10px;"></div>
+  <div style="margin-top:10px;">
+    <button id="cp" style="padding:9px 14px;border:none;border-radius:8px;
+      background:#31c48d;color:#06231a;font-weight:800;cursor:pointer;">Copy link</button>
+    <span id="ok" style="display:none;color:#31c48d;font-weight:700;margin-left:8px;">✓ copied</span>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script>
+  var URL_={url_js};
+  function draw(){{
+    try{{ new QRCode(document.getElementById('qr'),
+        {{text:URL_, width:200, height:200, correctLevel:QRCode.CorrectLevel.M}}); }}
+    catch(e){{ document.getElementById('qr').textContent='(QR failed — use Copy link)'; }}
+  }}
+  if(window.QRCode){{ draw(); }} else {{
+    var s=document.querySelector('script[src*="qrcode"]');
+    if(s){{ s.addEventListener('load',draw); }} else {{ setTimeout(draw,600); }}
+  }}
+  document.getElementById('cp').addEventListener('click',function(){{
+    function ok(){{ document.getElementById('ok').style.display='inline'; }}
+    if(navigator.clipboard&&navigator.clipboard.writeText){{
+      navigator.clipboard.writeText(URL_).then(ok,function(){{alert(URL_);}});
+    }} else {{ alert(URL_); }}
+  }});
+</script>
+""", height=320)
+        st.text_input("…or copy the link", value=url, key="peek_link_box")
 
 
 def _render_bookmarklet_body(container):
@@ -1335,6 +1463,7 @@ ss.mode = mode
 st.sidebar.markdown("### League")
 scoring_label = st.sidebar.selectbox("Scoring", list(SCORING_LABELS.keys()), index=1)
 scoring_key = SCORING_LABELS[scoring_label]
+ss["_scoring_key_for_peek"] = scoring_key   # stash so the peek link can carry it
 teams = st.sidebar.number_input("Teams", 4, 16, 12)
 slot = st.sidebar.number_input("Your draft slot", 1, int(teams), 6)
 rounds = st.sidebar.number_input("Rounds", 8, 25, 16)
@@ -1357,6 +1486,20 @@ ss.copilot_voice = st.sidebar.toggle(
          "earned nickname. Turn off for a quiet board.")
 
 starters = {"QB": qb, "RB": rb, "WR": wr, "TE": te, "FLEX": flex, "DST": dst, "K": k}
+
+# PEEK MODE: the phone mirror inherits the desktop's league shape from the peek
+# link, so its board/order/survival odds match the real draft exactly — no need
+# to re-enter league settings on the phone.
+if ss.peek_mode:
+    if ss.get("_peek_teams"):
+        teams = int(ss["_peek_teams"])
+    if ss.get("_peek_slot"):
+        slot = int(ss["_peek_slot"])
+    if ss.get("_peek_rounds"):
+        rounds = int(ss["_peek_rounds"])
+    if ss.get("_peek_scoring"):
+        scoring_key = ss["_peek_scoring"]
+
 cfg = E.LeagueConfig(
     teams=int(teams), draft_slot=int(slot), rounds=int(rounds),
     scoring=E.Scoring.preset(scoring_key),
@@ -1424,6 +1567,23 @@ elif mode == "ESPN":
         st.sidebar.error("ESPN client unavailable (install `requests`).")
     else:
         have_ck = bool(ss.espn_s2 and ss.espn_swid)
+        # PEEK MODE auto-connect: the phone opened a peek link with cookies +
+        # league. Silently connect (read-only) and sync so it just mirrors the
+        # live draft — no Connect button, no sidebar fiddling on the phone.
+        if (ss.peek_mode and ss.espn is None and have_ck
+                and str(ss.get("_peek_league", "")).strip().isdigit()):
+            try:
+                _pcli = EC.EspnClient(int(ss["_peek_league"]),
+                                      int(ss.get("_peek_season") or 2026),
+                                      ss.espn_s2, ss.espn_swid)
+                _ok, _msg = _pcli.verify()
+                ss.espn = _pcli if _ok else None
+                ss.espn_status = _msg
+                if _ok:
+                    _sync_espn(cfg, force=True)
+            except Exception as _ex:  # noqa: BLE001
+                ss.espn = None
+                ss.espn_status = f"Peek connect failed: {_ex}"
         # DESKTOP-only: the ESPN login popup opens a real browser window, which
         # can't happen on a headless server. On the CLOUD everyone pastes their
         # own cookies (below), kept only in their private session.
@@ -1535,13 +1695,18 @@ elif mode == "ESPN":
             with st.spinner("Learning opponent draft DNA…"):
                 _learn_dna(league_id, season, ss.dna_seasons)
             st.rerun()
+        # OPEN ON MY PHONE: once connected, offer the read-only peek link/QR so
+        # you can glance at Shredder on your phone while drafting on the computer.
+        if ss.espn and not ss.peek_mode:
+            _render_peek_share(cfg, st.sidebar)
 
-# undo is always available
-st.sidebar.markdown("---")
-if st.sidebar.button("↩️ Undo last pick", use_container_width=True):
-    if _undo():
-        st.toast("Reverted the last pick.")
-        st.rerun()
+# undo is available except in read-only peek mode
+if not ss.peek_mode:
+    st.sidebar.markdown("---")
+    if st.sidebar.button("↩️ Undo last pick", use_container_width=True):
+        if _undo():
+            st.toast("Reverted the last pick.")
+            st.rerun()
 
 
 # --------------------------------------------------------------------------- gate
@@ -1702,7 +1867,7 @@ _view = st.radio("View",
                  ["🎯 Draft board", "📋 Rankings guide", "📅 Weekly lineup"],
                  horizontal=True, label_visibility="collapsed", key="top_view")
 
-if mode == "ESPN" and ss.espn:
+if mode == "ESPN" and ss.espn and not ss.peek_mode:
     sc = st.columns([1, 1, 4])
     if sc[0].button("🔄 Sync now"):
         _sync_espn(cfg, force=True)
@@ -1715,6 +1880,23 @@ if mode == "ESPN" and ss.espn:
         import time as _t
         _t.sleep(4)
         st.rerun()
+
+# PEEK MODE: the phone mirror. Show a small read-only banner, keep pulling the
+# live draft from ESPN, and auto-refresh so picks appear on their own — no taps.
+if ss.peek_mode:
+    if ss.espn:
+        st.info("👀 **Peek mode** — read-only mirror of your live draft. "
+                "Updates on its own; draft on your computer.")
+        _sync_espn(cfg)
+        # Auto-refresh so new picks appear on their own — only under a live server
+        # (guarded so the test harness doesn't loop forever).
+        if _is_live_runtime():
+            import time as _t
+            _t.sleep(6)
+            st.rerun()
+    else:
+        st.warning("👀 Peek mode couldn't connect to the draft. "
+                   + (ss.get("espn_status") or "Re-open the link from your computer."))
 
 
 # =========================================================================== RANKINGS GUIDE
@@ -1906,24 +2088,27 @@ _render_rivals_forecast(cfg, opps, loyalty_by_slot)
 
 
 # --------------------------------------------------------------------------- someone got drafted
-st.markdown("#### Someone just got picked?")
-sg = st.columns([4, 1, 1])
-available_names = [p.name for p in pool if p.name not in ss.drafted]
-picked = sg[0].selectbox(
-    "Search the player another team drafted", ["—"] + available_names,
-    label_visibility="collapsed",
-    help="Type to filter. Mark them gone and your next-best pick updates instantly.")
-if sg[1].button("✗ Gone (other team)", use_container_width=True,
-                disabled=(picked == "—")):
-    _mark_gone(cfg, picked, opps)
-    st.rerun()
-if sg[2].button("✓ I drafted them", use_container_width=True,
-                disabled=(picked == "—")):
-    raw = name_to_raw.get(picked)
-    _record_pick(cfg, picked, raw.position if raw else "?", mine=True, opps=opps)
-    st.rerun()
+# In PEEK mode the phone is read-only — you draft on the computer, the phone just
+# mirrors it — so the manual "mark someone gone / I drafted them" controls hide.
+if not ss.peek_mode:
+    st.markdown("#### Someone just got picked?")
+    sg = st.columns([4, 1, 1])
+    available_names = [p.name for p in pool if p.name not in ss.drafted]
+    picked = sg[0].selectbox(
+        "Search the player another team drafted", ["—"] + available_names,
+        label_visibility="collapsed",
+        help="Type to filter. Mark them gone and your next-best pick updates instantly.")
+    if sg[1].button("✗ Gone (other team)", use_container_width=True,
+                    disabled=(picked == "—")):
+        _mark_gone(cfg, picked, opps)
+        st.rerun()
+    if sg[2].button("✓ I drafted them", use_container_width=True,
+                    disabled=(picked == "—")):
+        raw = name_to_raw.get(picked)
+        _record_pick(cfg, picked, raw.position if raw else "?", mine=True, opps=opps)
+        st.rerun()
 
-st.divider()
+    st.divider()
 
 
 # --------------------------------------------------------------------------- main split
@@ -1946,14 +2131,15 @@ with left:
             f'</div>'
             f'<div class="pmeta" style="margin-top:4px;">{need_line}</div></div>',
             unsafe_allow_html=True)
-        bcol = st.columns(2)
-        if bcol[0].button(f"✓ Draft {best.name.split()[-1]}", type="primary",
-                          use_container_width=True, key="hero_draft"):
-            _record_pick(cfg, best.name, best.position, mine=True, opps=opps)
-            st.rerun()
-        if bcol[1].button("✗ Gone", use_container_width=True, key="hero_gone"):
-            _mark_gone(cfg, best.name, opps)
-            st.rerun()
+        if not ss.peek_mode:
+            bcol = st.columns(2)
+            if bcol[0].button(f"✓ Draft {best.name.split()[-1]}", type="primary",
+                              use_container_width=True, key="hero_draft"):
+                _record_pick(cfg, best.name, best.position, mine=True, opps=opps)
+                st.rerun()
+            if bcol[1].button("✗ Gone", use_container_width=True, key="hero_gone"):
+                _mark_gone(cfg, best.name, opps)
+                st.rerun()
         _render_why(best, key="hero")
     else:
         st.warning("No players available. Reset the board or check your data.")
@@ -2009,13 +2195,14 @@ with left:
                 f'{adp_txt}{vva}{surv}</span><br>'
                 f'<div style="margin-top:4px;">{_badges_html(r.badges, 3)}</div>',
                 unsafe_allow_html=True)
-            bc = st.columns(2)
-            if bc[0].button("✓ Draft", key=f"d_{r.name}", use_container_width=True):
-                _record_pick(cfg, r.name, r.position, mine=True, opps=opps)
-                st.rerun()
-            if bc[1].button("✗ Gone", key=f"g_{r.name}", use_container_width=True):
-                _mark_gone(cfg, r.name, opps)
-                st.rerun()
+            if not ss.peek_mode:
+                bc = st.columns(2)
+                if bc[0].button("✓ Draft", key=f"d_{r.name}", use_container_width=True):
+                    _record_pick(cfg, r.name, r.position, mine=True, opps=opps)
+                    st.rerun()
+                if bc[1].button("✗ Gone", key=f"g_{r.name}", use_container_width=True):
+                    _mark_gone(cfg, r.name, opps)
+                    st.rerun()
             _render_why(r, key=f"row_{r.name}")
 
 with right:
