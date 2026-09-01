@@ -337,6 +337,7 @@ def _init_state():
     ss.setdefault("dna_seasons", "2021,2022,2023,2024,2025")
     ss.setdefault("_manual_tendencies", {})  # {slot: {tendencies, rookie_averse}}
     ss.setdefault("_cookie_loaded", False)
+    ss.setdefault("intent", "")              # "" until the first-run gate is answered
     ss.setdefault("peek_mode", False)        # read-only phone mirror of a live draft
     ss.setdefault("_peek_league", "")        # league id carried in the peek link
     ss.setdefault("_peek_season", 0)         # season carried in the peek link
@@ -493,6 +494,70 @@ def _password_gate():
 _password_gate()
 
 
+def _intent_gate():
+    """First-run 'what are you here to do?' screen. ONE clear fork so people
+    aren't staring at every path at once:
+      • Draft on this device  -> the normal setup (ESPN / Mock / Manual).
+      • Just watch (peek)      -> scan the QR from the computer running the draft.
+    Only shows on the hosted app, only until answered, and NEVER for a peek link
+    (those carry ?peek=1 and flow straight to the read-only board). Desktop skips
+    it entirely so nothing changes there."""
+    if not IS_CLOUD or ss.get("peek_mode") or ss.get("intent"):
+        return
+    # already connected / mid-draft in this session? skip the gate.
+    if ss.get("espn") is not None or ss.get("mock_on"):
+        ss.intent = "draft"
+        return
+
+    _render_masthead()
+    st.markdown("### Welcome — how are you using Shredder right now?")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            "#### 🎯 I'm drafting on this device\n"
+            "Connect your ESPN league (or run a mock) and get the best pick, live, "
+            "as you draft right here.")
+        if st.button("Draft here", type="primary", use_container_width=True,
+                     key="intent_draft"):
+            ss.intent = "draft"
+            st.rerun()
+    with c2:
+        st.markdown(
+            "#### 👀 I'm just watching (peek)\n"
+            "Drafting somewhere else and want Shredder's picks on this screen too? "
+            "Open the peek link from the computer running Shredder — no login here.")
+        if st.button("I'm just watching", use_container_width=True,
+                     key="intent_watch"):
+            ss.intent = "watch"
+            st.rerun()
+    if ss.intent == "watch":
+        pass  # handled below after rerun
+    st.caption("You can switch anytime from the sidebar.")
+    st.stop()
+
+
+def _render_watch_help():
+    """The 'just watching' landing: dead-simple instructions to get the peek link
+    from the device that's running the draft. No cookies, no typing here."""
+    _render_masthead()
+    st.markdown("### 👀 Watch a draft (peek mode)")
+    st.markdown(
+        "Peek mode mirrors a draft that's running on **another device** — you just "
+        "watch Shredder's picks here, read-only.\n\n"
+        "**To start watching:**\n"
+        "1. On the computer running Shredder, connect your ESPN league.\n"
+        "2. Open **📱 Open on my phone** there — it shows a QR code.\n"
+        "3. **Scan that QR with this device's camera.** You'll land right back here, "
+        "already connected and auto-updating.\n\n"
+        "That's it — nothing to log into on this screen.")
+    st.info("No QR yet? Whoever set up the draft needs to hit Connect first, then "
+            "the 'Open on my phone' code appears.")
+    if st.button("← Actually, I want to draft here", key="watch_back"):
+        ss.intent = "draft"
+        st.rerun()
+    st.stop()
+
+
 @st.cache_data(show_spinner="Loading player projections…")
 def _load_pool():
     return P.load_players(prefer_live=True)
@@ -542,6 +607,12 @@ def _render_masthead():
 </style>
 """, unsafe_allow_html=True)
 
+
+# First-run fork (cloud only): drafting here vs. just watching. This renders its
+# own masthead and stops the script until answered; peek links skip it entirely.
+_intent_gate()
+if ss.get("intent") == "watch" and not ss.get("peek_mode"):
+    _render_watch_help()
 
 _render_masthead()
 
@@ -1065,14 +1136,14 @@ def _render_bookmarklet_setup():
     a wall of instructions for platforms they aren't on. One-time ~30s setup,
     then it's a single tap every draft. Uses components.html so the copy button
     and platform switch actually run JS."""
-    import json as _json
-    import streamlit.components.v1 as _components
-    _render_bookmarklet_body(st.sidebar)
+    # Rendered inside an 'Advanced' expander now, so no inner expander.
+    _render_bookmarklet_body(st.sidebar, use_expander=False)
 
 
 def _render_bookmarklet_setup_main():
-    """Same one-tap setup, rendered on the MAIN page (for the phone connect panel)."""
-    _render_bookmarklet_body(st)
+    """Same one-tap setup, rendered on the MAIN page (for the phone connect panel).
+    Rendered inside an 'Advanced' expander now, so no inner expander."""
+    _render_bookmarklet_body(st, use_expander=False)
 
 
 def _peek_url(cfg):
@@ -1149,15 +1220,20 @@ def _render_peek_share(cfg, container):
         st.text_input("…or copy the link", value=url, key="peek_link_box")
 
 
-def _render_bookmarklet_body(container):
-    """Shared body for the one-tap login setup; `container` is st or st.sidebar."""
+def _render_bookmarklet_body(container, use_expander=True):
+    """Shared body for the one-tap login setup; `container` is st or st.sidebar.
+    When `use_expander` is False the caller has already opened a disclosure
+    (Streamlit forbids nested expanders), so we render inline instead."""
     import json as _json
+    import contextlib
     import streamlit.components.v1 as _components
     base = _app_base_url()
     bm = _bookmarklet_js(base)
     bm_js = _json.dumps(bm)          # safe-embed the bookmarklet as a JS string
     accent = "#31c48d"
-    with container.expander("📲 One-tap login — set up once (~30s)", expanded=False):
+    _ctx = (container.expander("📲 One-tap login — set up once (~30s)", expanded=False)
+            if use_expander else contextlib.nullcontext())
+    with _ctx:
         st.caption("The easiest way to connect. Do this once; after that it's a "
                    "single tap every draft. Your cookies go straight from ESPN "
                    "into your own private session — never stored on the server.")
@@ -1601,15 +1677,10 @@ elif mode == "ESPN":
         if IS_CLOUD and not have_ck:
             st.sidebar.markdown("**Connect your ESPN account**")
             st.sidebar.caption(
-                "Easiest: use the one-tap login below (no typing). Or paste your "
-                "two ESPN cookies manually. Either way they stay private to your "
+                "Paste your two ESPN cookies below. They stay private to your "
                 "session — never saved on the server.")
-        # ONE-TAP: the bookmarklet (primary path on the phone; also shows on
-        # desktop). Only relevant on the hosted app.
-        if IS_CLOUD:
-            _render_bookmarklet_setup()
-        with st.sidebar.expander("…or paste cookies manually (espn_s2 + SWID)",
-                                 expanded=(not have_ck and not IS_CLOUD)):
+        with st.sidebar.expander("Paste cookies (espn_s2 + SWID)",
+                                 expanded=(not have_ck)):
             if IS_CLOUD:
                 st.caption("To find them: on a computer logged into "
                            "fantasy.espn.com, DevTools (F12) → Application → "
@@ -1632,6 +1703,12 @@ elif mode == "ESPN":
                     except Exception:  # noqa: BLE001
                         pass
                 st.rerun()
+
+        # ONE-TAP bookmarklet demoted to Advanced (QR peek covers the common
+        # phone case now, so this is only for 'connect on my phone, no computer').
+        if IS_CLOUD and not have_ck:
+            with st.sidebar.expander("⚙️ Advanced: one-tap login", expanded=False):
+                _render_bookmarklet_setup()
 
         # ---- auto-discover: paste cookies, then pick your league ----
         _saved = _saved_leagues_load()
@@ -1722,24 +1799,28 @@ def _render_espn_connect_main(cfg):
     have_ck = bool(ss.espn_s2 and ss.espn_swid)
     st.markdown("### 🔌 Connect your ESPN league")
     if not have_ck:
-        st.caption("Step 1: get your ESPN cookies (one-tap login is easiest), or "
-                   "paste them. They stay private to your session — never stored "
-                   "on the server.")
+        st.caption("Paste your two ESPN cookies to connect. They stay private to "
+                   "your session — never stored on the server.")
+        # PRIMARY path now = paste cookies (open by default). The one-tap
+        # bookmarklet is tucked into 'Advanced' since QR peek covers the common
+        # 'watch on my phone' case without any of this.
+        s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2,
+                           key="m_s2")
+        swid = st.text_input("SWID", type="password", value=ss.espn_swid,
+                             key="m_swid")
+        if st.button("Use these cookies", type="primary", key="m_useck",
+                     use_container_width=True):
+            ss.espn_s2, ss.espn_swid = s2, swid
+            if not IS_CLOUD and SEC:
+                SEC.save_file(s2, swid)
+            st.rerun()
+        st.caption("Where do I find these? On a computer logged into "
+                   "fantasy.espn.com: DevTools (F12) → Application → Cookies → "
+                   "copy `espn_s2` and `SWID`.")
         if IS_CLOUD:
-            _render_bookmarklet_setup_main()
-        with st.expander("…or paste cookies manually (espn_s2 + SWID)",
-                         expanded=False):
-            st.caption("On a computer logged into fantasy.espn.com: DevTools (F12) "
-                       "→ Application → Cookies → copy `espn_s2` and `SWID`.")
-            s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2,
-                               key="m_s2")
-            swid = st.text_input("SWID", type="password", value=ss.espn_swid,
-                                 key="m_swid")
-            if st.button("Use these cookies", key="m_useck"):
-                ss.espn_s2, ss.espn_swid = s2, swid
-                if not IS_CLOUD and SEC:
-                    SEC.save_file(s2, swid)
-                st.rerun()
+            with st.expander("⚙️ Advanced: one-tap login (no computer handy)",
+                             expanded=False):
+                _render_bookmarklet_setup_main()
     else:
         st.success("✓ Cookies loaded. Step 2: pick your league.")
         _saved = _saved_leagues_load()
