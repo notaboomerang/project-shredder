@@ -6,16 +6,13 @@ secondaryBackgroundColor = "#111114"
 textColor = "#ececef"
 font = "monospace"
 
+# NOTE: server port/address/CORS are intentionally NOT set here. Streamlit Cloud
+# manages its own port (8501) + networking; hardcoding a port broke the cloud
+# health check. The local PHONE setup (run_phone.py) passes --server.port 8666,
+# --server.address 0.0.0.0, --server.enableCORS false, etc. as CLI flags, so the
+# desktop/phone experience is unchanged without those flags living in this file.
 [server]
 headless = true
-port = 8666
-# bind to all interfaces so your phone can reach it over Wi-Fi (same network)
-address = "0.0.0.0"
-# allow the phone (a different origin than localhost) to connect
-enableCORS = false
-enableXsrfProtection = false
-# don't try to pop a browser on the laptop when launched headless
-runOnSave = false
 
 [browser]
 gatherUsageStats = false
