@@ -163,32 +163,78 @@ class LeagueConfig:
 
 def replacement_ranks(cfg: LeagueConfig) -> dict[str, int]:
     """
-    Compute the replacement-level rank per position = the count of that
-    position that will be rostered as STARTERS across the whole league,
-    with flex/superflex demand distributed to the positions that fill them.
+    Per-position DEDICATED-starter replacement rank = teams × starters[pos].
 
     Baseline rank R means "the Rth-best player at this position is the
     replacement", i.e. VORP is measured against projected points of pos-rank R.
+
+    NOTE: FLEX is intentionally NOT distributed here anymore. Flex demand is
+    handled as a SINGLE combined RB/WR/TE pool in compute_vorp (see
+    flex_replacement_points), so a flex-worthy player at ANY eligible position
+    is valued off one shared flex line instead of a fractional per-position
+    sprinkle. Dedicated-starter ranks stay per-position.
     """
     teams = cfg.teams
     s = cfg.starters
-
-    # dedicated starters at each real position
     demand = {pos: teams * s.get(pos, 0) for pos in ("QB", "RB", "WR", "TE", "K", "DST")}
-
-    # distribute each flex-type slot's league-wide demand across eligible positions.
-    # Split by a rough real-world usage weight (RB/WR carry most flex snaps).
-    weights = {"QB": 0.15, "RB": 0.45, "WR": 0.45, "TE": 0.20}
-    for slot, count in s.items():
-        if slot in FLEX_ELIGIBLE and count:
-            elig = FLEX_ELIGIBLE[slot]
-            wsum = sum(weights.get(p, 0) for p in elig)
-            total = teams * count
-            for p in elig:
-                demand[p] = demand.get(p, 0) + total * (weights.get(p, 0) / wsum)
-
-    # replacement rank = ceil of starter demand (first NON-starter is the baseline)
     return {pos: max(1, math.ceil(d)) for pos, d in demand.items() if d > 0}
+
+
+def flex_replacement_points(players: list["PlayerValue"], cfg: LeagueConfig
+                            ) -> dict[str, float]:
+    """Replacement POINTS for each flex-type slot, from a SINGLE combined pool.
+
+    For each flex slot (FLEX, SUPERFLEX, ...), pool every eligible player across
+    its positions, drop the players already claimed by their DEDICATED starter
+    ranks, then the next `teams × count` fill the flex slots. The first player
+    BEYOND that is the flex replacement — its projected points is the single
+    line a flex-worthy player at any eligible position must clear.
+
+    Returns {slot_name: replacement_points}. Empty when no flex slots exist.
+    """
+    teams = cfg.teams
+    s = cfg.starters
+    out: dict[str, float] = {}
+
+    # dedicated starters already spoken for at each real position
+    dedicated = {pos: teams * s.get(pos, 0) for pos in ("QB", "RB", "WR", "TE", "K", "DST")}
+
+    # players by position, sorted best -> worst by projection
+    by_pos: dict[str, list[float]] = {}
+    for p in players:
+        by_pos.setdefault(p.position, []).append(p.proj_points)
+    for pos in by_pos:
+        by_pos[pos].sort(reverse=True)
+
+    for slot, count in s.items():
+        if slot not in FLEX_ELIGIBLE or not count:
+            continue
+        elig = FLEX_ELIGIBLE[slot]
+        # remaining flex-eligible players AFTER each position's dedicated starters
+        pool: list[float] = []
+        for pos in elig:
+            pts = by_pos.get(pos, [])
+            pool.extend(pts[dedicated.get(pos, 0):])
+        pool.sort(reverse=True)
+        if not pool:
+            # Pool smaller than dedicated demand (e.g. a tiny/late board): fall
+            # back to the combined-flex line over the FULL eligible pool at the
+            # equivalent absolute depth, so we never return a bogus 0.0 that
+            # would wipe out VORP. None => caller keeps the dedicated line.
+            full = sorted((pt for pos in elig for pt in by_pos.get(pos, [])),
+                          reverse=True)
+            if not full:
+                continue
+            ded_total = sum(dedicated.get(pos, 0) for pos in elig)
+            idx = min(ded_total + teams * count, len(full) - 1)
+            out[slot] = full[idx]
+            continue
+        flex_slots = teams * count
+        # the flex starters are pool[0:flex_slots]; the replacement is the very
+        # next player (index flex_slots), clamped to the pool.
+        idx = min(flex_slots, len(pool) - 1)
+        out[slot] = pool[idx]
+    return out
 
 
 @dataclass
@@ -206,8 +252,25 @@ class PlayerValue:
 
 
 def compute_vorp(players: list[PlayerValue], cfg: LeagueConfig) -> list[PlayerValue]:
-    """Rank within position, set replacement baseline, compute VORP + tiers."""
+    """Rank within position, set replacement baseline, compute VORP + tiers.
+
+    FLEX is a SINGLE combined RB/WR/TE pool: a flex-eligible player is valued
+    off whichever line is EASIER to clear — its own dedicated-position
+    replacement OR the shared flex replacement (min points) — because clearing
+    either earns a starting spot. This makes, e.g., a top-tier TE in a 1-TE
+    league still valued for the flex it can win, while a stockpiled 2nd TE that
+    beats neither line correctly grades as bench.
+    """
     baselines = replacement_ranks(cfg)
+    flex_pts = flex_replacement_points(players, cfg)
+
+    # the single flex line that applies to RB/WR/TE (standard FLEX). If multiple
+    # flex-type slots exist, a position uses the LOWEST flex line it's eligible
+    # for (easiest bar to clear).
+    def _flex_line_for(pos: str) -> Optional[float]:
+        lines = [pv for slot, pv in flex_pts.items()
+                 if pos in FLEX_ELIGIBLE.get(slot, ())]
+        return min(lines) if lines else None
 
     by_pos: dict[str, list[PlayerValue]] = {}
     for p in players:
@@ -216,9 +279,16 @@ def compute_vorp(players: list[PlayerValue], cfg: LeagueConfig) -> list[PlayerVa
     for pos, plist in by_pos.items():
         plist.sort(key=lambda x: x.proj_points, reverse=True)
         base_rank = baselines.get(pos, len(plist))
-        # replacement points = projection of the player AT the baseline rank
         idx = min(base_rank, len(plist)) - 1
-        base_pts = plist[idx].proj_points if plist else 0.0
+        dedicated_pts = plist[idx].proj_points if plist else 0.0
+        # For a flex-eligible position, the true replacement is the SINGLE
+        # combined-flex line (the marginal flex starter pooled across RB/WR/TE) —
+        # that's the real opportunity cost of a starting-caliber flex body. This
+        # unifies RB/WR/TE onto one line: a deep, shallow position (TE) is judged
+        # against the same flex bar as RB/WR, so only genuinely flex-worthy TEs
+        # carry positive value and a stockpiled 2nd TE grades as bench.
+        fl = _flex_line_for(pos)
+        base_pts = fl if fl is not None else dedicated_pts
         for i, p in enumerate(plist, start=1):
             p.pos_rank = i
             p.vorp = round(p.proj_points - base_pts, 1)
