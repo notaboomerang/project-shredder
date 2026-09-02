@@ -108,7 +108,7 @@ def _icon_data_uri(fname):
 
 
 st.set_page_config(page_title="Project Shredder", layout="wide",
-                   page_icon=(_ICON if _os.path.exists(_ICON) else "🎸"),
+                   page_icon=(_ICON if _os.path.exists(_ICON) else "▲"),
                    # "auto" = collapsed on phones (board first), expanded on desktop
                    initial_sidebar_state="auto")
 
@@ -181,12 +181,41 @@ _inject_pwa()
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;700;800&family=Inter:wght@400;600;700&display=swap');
 :root{
-  --bg:#0b0d12; --panel:#141822; --panel2:#1b2130; --line:#2a3242;
-  --txt:#eef2f8; --dim:#8b95a7; --accent:#33d69f; --accent2:#5b9dff;
-  --warn:#ffb454; --bad:#ff5c5c; --good:#33d69f;
+  /* pure black to match the Shredder icon's background exactly, so the icon
+     blends seamlessly into the page. panels are black too; separation comes
+     from thin borders, not fills. */
+  --bg:#000000; --panel:#000000; --panel2:#0a0a0a; --line:#242424;
+  --txt:#ffffff; --dim:#ffffff; --accent:#ffffff; --accent2:#ffffff;
+  --warn:#ffffff; --bad:#ffffff; --good:#ffffff;
+  /* one header font used everywhere a title appears, so the app reads as one piece */
+  --head:'Space Grotesk','Inter',-apple-system,Segoe UI,Roboto,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --body:'Inter',-apple-system,Segoe UI,Roboto,sans-serif;
 }
-.stApp{background:radial-gradient(1100px 600px at 80% -10%, #17202e 0%, var(--bg) 60%);}
+.stApp{background:#000000; font-family:var(--body); color:#ffffff;}
+[data-testid="stAppViewContainer"],[data-testid="stHeader"],
+section[data-testid="stSidebar"]{background:#000000 !important;}
+/* ALL TEXT WHITE by default */
+.stApp, .stApp p, .stApp span, .stApp div, .stApp li, .stApp label,
+[data-testid="stMarkdownContainer"]{color:#ffffff;}
+/* MATCH THE HEADER FONT THROUGHOUT: every Streamlit heading + our section titles
+   render in the same display face as the masthead, so headers feel unified. */
+.stApp h1,.stApp h2,.stApp h3,.stApp h4,
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stMarkdownContainer"] h4{
+  font-family:var(--head)!important;font-weight:700!important;
+  letter-spacing:.2px;color:#ffffff !important;}
+/* LINKS: white, underlined; invert to black-on-white on hover */
+.stApp a, [data-testid="stMarkdownContainer"] a{
+  color:#ffffff !important;text-decoration:underline !important;
+  text-underline-offset:2px;transition:background .12s,color .12s;}
+.stApp a:hover, [data-testid="stMarkdownContainer"] a:hover{
+  color:#000000 !important;background:#ffffff !important;
+  text-decoration:none !important;}
 [data-testid="stMetricValue"]{font-size:22px;font-weight:800;color:var(--txt);}
 [data-testid="stMetricLabel"]{color:var(--dim);text-transform:uppercase;
   font-size:11px;letter-spacing:.5px;}
@@ -195,8 +224,10 @@ st.markdown("""
 .stButton>button{border-radius:8px;font-weight:700;border:1px solid var(--line);
   background:var(--panel2);color:var(--txt);}
 .stButton>button:hover{border-color:var(--accent);color:var(--accent);}
-.stButton>button[kind="primary"]{background:var(--accent);color:#06231a;
-  border:1px solid var(--accent);}
+.stButton>button[kind="primary"]{background:#ffffff;color:#000000 !important;
+  border:1px solid #ffffff;}
+.stButton>button[kind="primary"] *{color:#000000 !important;}
+.stButton>button[kind="primary"]:hover{background:#d9d9d9;color:#000000 !important;}
 .pill{font:800 12px 'JetBrains Mono',monospace;padding:2px 8px;border-radius:6px;
   background:var(--panel2);color:var(--txt);border:1px solid var(--line);}
 .pos-RB{background:#1f3a2e;color:#7ff0c0;border-color:#2f6e52;}
@@ -213,22 +244,29 @@ st.markdown("""
 .bdg-urgent{background:#3a1414;color:#ff9c9c;border-color:#7a2f2f;}
 .bdg-need{background:#12233a;color:#8fbcff;border-color:#2f5aa0;}
 .bdg-cliff{background:#33260f;color:#ffcf8f;border-color:#7a5f2f;}
-.hero{background:linear-gradient(100deg,#10261f,#122033);border:1px solid var(--accent);
+.hero{background:#000000;border:2px solid #ffffff;
   border-radius:14px;padding:18px 22px;margin-bottom:14px;
-  box-shadow:0 0 30px rgba(51,214,159,.18);}
-.hero .tag{font:800 12px 'JetBrains Mono',monospace;color:var(--accent);
+  box-shadow:0 0 24px rgba(255,255,255,.08);}
+.hero .tag{font:800 12px var(--mono);color:var(--accent);
   letter-spacing:1.5px;}
-.hero .nm{font-size:30px;font-weight:800;color:var(--txt);margin:2px 0;}
-.masthead{display:flex;align-items:center;gap:14px;
-  background:linear-gradient(100deg,#0d1119 0%,#141a26 100%);
-  border:1px solid var(--line);border-left:4px solid var(--accent);
-  border-radius:12px;padding:14px 20px;margin-bottom:14px;
-  box-shadow:0 6px 30px rgba(0,0,0,.5);}
-.masthead img{width:48px;height:48px;border-radius:10px;border:1px solid var(--line);}
-.masthead h1{font-size:26px;font-weight:800;margin:0;letter-spacing:1px;
-  text-transform:uppercase;color:var(--txt);}
-.masthead .sub{color:var(--dim);font-size:12px;margin-top:2px;
-  font-family:'JetBrains Mono',monospace;letter-spacing:.3px;}
+.hero .nm{font-family:var(--head);font-size:30px;font-weight:700;color:var(--txt);margin:2px 0;}
+.masthead{display:flex;align-items:center;gap:16px;
+  background:#000000;border:none;border-radius:0;
+  padding:6px 2px 10px;margin-bottom:12px;box-shadow:none;
+  border-bottom:1px solid var(--line);}
+/* bigger icon so the knuckle tattoos are readable; no border/radius so its own
+   black background is invisible against the page — the fists just float. */
+.masthead img{width:76px;height:76px;border-radius:0;border:none;
+  background:#000000;}
+.mono-mark{display:inline-flex;align-items:center;justify-content:center;
+  width:76px;height:76px;border-radius:12px;flex:0 0 76px;
+  font-family:var(--head);font-weight:700;font-size:26px;letter-spacing:1px;
+  color:#ffffff;background:#000000;border:2px solid #ffffff;}
+.masthead h1{font-family:var(--head);font-size:27px;font-weight:700;margin:0;
+  letter-spacing:.4px;color:var(--txt);}
+.masthead h1 .lo{color:var(--accent);}
+.masthead .sub{color:var(--dim);font-size:12px;margin-top:3px;
+  font-family:var(--mono);letter-spacing:.3px;}
 .rowline{padding:6px 0;border-bottom:1px solid var(--line);}
 .slotchip{display:inline-block;font:700 11px 'JetBrains Mono',monospace;
   padding:3px 8px;margin:2px;border-radius:6px;border:1px solid var(--line);}
@@ -258,8 +296,28 @@ st.markdown("""
 .insight.i-combo{border-left-color:var(--accent);}
 .insight.i-snipe{border-left-color:var(--warn);}
 .insight.i-dark_horse{border-left-color:#e0a0ff;}
-.insight .it{font:800 13px 'Inter',sans-serif;color:var(--txt);}
+.insight .it{font-family:var(--head);font-weight:700;font-size:13.5px;color:var(--txt);}
 .insight .ib{font-size:12.5px;color:var(--dim);margin-top:2px;line-height:1.45;}
+
+/* ===================== SIDEBAR — a touch smaller + tidy ================== */
+section[data-testid="stSidebar"]{font-size:13px;}
+section[data-testid="stSidebar"] .stMarkdown p,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] .stCaption,
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p{
+  font-size:12.5px !important;}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3{
+  font-family:var(--head)!important;font-size:15px !important;
+  letter-spacing:.3px;margin-bottom:.2rem;}
+/* the app wordmark at the very top of the sidebar */
+.sb-brand{font-family:var(--head);font-weight:700;font-size:17px;letter-spacing:.4px;
+  color:var(--txt);margin:0 0 2px;}
+.sb-brand .lo{color:var(--accent);}
+section[data-testid="stSidebar"] .stButton>button{font-size:12.5px;}
+section[data-testid="stSidebar"] input,
+section[data-testid="stSidebar"] [data-baseweb="select"]{font-size:12.5px !important;}
 
 /* ======================= MOBILE / PHONE (<=820px) ======================= */
 @media (max-width: 820px){
@@ -283,11 +341,14 @@ st.markdown("""
   /* metric tiles shrink so 4-across becomes a tidy stacked list */
   [data-testid="stMetricValue"]{font-size:19px !important;}
   [data-testid="stMetricLabel"]{font-size:10px !important;}
-  /* masthead: smaller so it doesn't eat the first screen */
-  .masthead{padding:10px 14px !important; gap:10px !important;}
-  .masthead h1{font-size:20px !important;}
+  /* masthead: smaller so it doesn't eat the first screen, but keep the icon
+     big enough to read the knuckle tattoos */
+  .masthead{padding:6px 2px 8px !important; gap:12px !important;}
+  .masthead h1{font-size:21px !important;}
   .masthead .sub{font-size:10px !important;}
-  .masthead img{width:38px !important; height:38px !important;}
+  .masthead img{width:58px !important; height:58px !important;}
+  .mono-mark{width:58px !important;height:58px !important;flex:0 0 58px !important;
+    font-size:20px !important;}
   /* tables/rows: tighter, wrap-friendly */
   .pname{font-size:15px !important;}
   .pmeta{font-size:12px !important;}
@@ -478,7 +539,11 @@ def _password_gate():
     if ss.get("_authed"):
         return
     # simple full-screen login
-    st.markdown("## 🎸 Project Shredder")
+    st.markdown(
+        '<div style="font-family:var(--head);font-weight:700;font-size:30px;'
+        'letter-spacing:.4px;margin:.2rem 0;">Project '
+        '<span style="color:var(--accent);">Shredder</span></div>',
+        unsafe_allow_html=True)
     st.caption("Enter the access password to continue.")
     with st.form("pw_gate", clear_on_submit=False):
         pw = st.text_input("Password", type="password")
@@ -570,13 +635,16 @@ name_to_raw = {p.name: p for p in pool}
 
 def _render_masthead():
     """PROJECT SHREDDER masthead — the icon + name + tagline, rendered once up top."""
-    uri = _icon_data_uri("shredder_icon_128.png") or _icon_data_uri("shredder_icon.png")
-    img = f'<img src="{uri}" alt="Shredder">' if uri else '<span style="font-size:40px;">🎸</span>'
+    # Use the full-res icon so the knuckle tattoos stay crisp at the larger size.
+    uri = _icon_data_uri("shredder_icon.png") or _icon_data_uri("shredder_icon_128.png")
+    # Clean CSS monogram when there's no icon file — no emoji.
+    img = (f'<img src="{uri}" alt="Project Shredder">' if uri else
+           '<span class="mono-mark">PS</span>')
     st.markdown(
         f'<div class="masthead">{img}<div>'
-        f'<h1>PROJECT SHREDDER</h1>'
-        f'<div class="sub">// live-draft copilot · VORP + edge engine · '
-        f'contextual insights · shred the board</div>'
+        f'<h1>Project <span class="lo">Shredder</span></h1>'
+        f'<div class="sub">live-draft copilot · VORP + edge engine · '
+        f'contextual insights</div>'
         f'</div></div>', unsafe_allow_html=True)
     # PHONE-ONLY: an obvious 'Setup / Connect' bar that opens the sidebar drawer
     # (setup + ESPN connect live there). Clicks Streamlit's own sidebar toggle so
@@ -603,7 +671,7 @@ def _render_masthead():
 @media (max-width:820px){
   .shredder-setup-btn{display:block;width:100%;margin:0 0 10px;padding:12px;
     background:var(--accent);color:#06231a;border:none;border-radius:10px;
-    font:800 15px 'Inter',sans-serif;letter-spacing:.3px;}
+    font-family:var(--head);font-weight:700;font-size:15px;letter-spacing:.3px;}
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1381,7 +1449,7 @@ def _render_bookmarklet_body(container, use_expander=True):
     <ol style="margin:6px 0 0 18px;padding:0;">
       <li>Open <b>fantasy.espn.com</b>, make sure you're logged in.</li>
       <li>Tap your <b>Shredder</b> bookmark.</li>
-      <li>You land back here <b>already connected</b>. 🎸</li>
+      <li>You land back here <b>already connected</b>.</li>
     </ol>
   </div>
 </div>
@@ -1480,9 +1548,11 @@ def _render_draft_summary(cfg, scoring_key):
         names = ss.team_rosters.get(slot, [])
         players = [(nm, name_to_raw[nm].position) for nm in names
                    if nm in name_to_raw]
-        proj, con, counts = _grade_team(players, cfg, scoring_key)
-        graded.append({"slot": slot, "players": players, "proj": proj,
-                       "con": con, "counts": counts})
+        g = _grade_team(players, cfg, scoring_key)
+        graded.append({"slot": slot, "players": players, "proj": g["proj"],
+                       "con": g["con"], "counts": g["counts"],
+                       "top3": g.get("top3", []), "wins": g.get("wins", []),
+                       "misses": g.get("misses", [])})
 
     # normalize projected points to 0-100 across the league (relative value)
     projs = [g["proj"] for g in graded] or [0]
@@ -1521,9 +1591,20 @@ def _render_draft_summary(cfg, scoring_key):
             c[0].markdown(f'<div style="font:800 26px \'JetBrains Mono\',monospace;'
                           f'color:var(--accent);text-align:center;">{letter}</div>',
                           unsafe_allow_html=True)
+            # why this grade: best players + the wins/misses that moved the needle
+            top3 = " · ".join(f"{nm}" for nm, _p, _pp in g.get("top3", [])[:3])
+            why_bits = []
+            for w in g.get("wins", [])[:2]:
+                why_bits.append(f'<span style="color:var(--good);">✓ {w}</span>')
+            for m in g.get("misses", [])[:2]:
+                why_bits.append(f'<span style="color:var(--warn);">✗ {m}</span>')
+            why = " · ".join(why_bits)
             c[1].markdown(
                 f'<div><b>#{rank} · {who}</b>{tag}</div>'
-                f'<div class="pmeta">{mix}</div>', unsafe_allow_html=True)
+                f'<div class="pmeta">{mix}</div>'
+                + (f'<div class="pmeta">best: {top3}</div>' if top3 else "")
+                + (f'<div class="pmeta">{why}</div>' if why else ""),
+                unsafe_allow_html=True)
             c[2].markdown(f'<div class="pmeta" style="text-align:right;">score '
                           f'{g["score"]:.0f}<br>proj {g["proj"]:.0f}</div>',
                           unsafe_allow_html=True)
@@ -1635,7 +1716,9 @@ def _render_recent_picks(limit=10):
 
 
 # --------------------------------------------------------------------------- sidebar
-st.sidebar.title("🎸 SHREDDER")
+st.sidebar.markdown(
+    '<div class="sb-brand">Project <span class="lo">Shredder</span></div>',
+    unsafe_allow_html=True)
 
 _MODES = ["Mock", "Manual", "ESPN"]
 mode = st.sidebar.radio("How are you drafting?", _MODES,
@@ -1666,7 +1749,7 @@ with st.sidebar.expander("Starting lineup", expanded=False):
 
 prefer_floor = st.sidebar.toggle("Prioritize weekly floor (consistency)", value=False)
 ss.copilot_voice = st.sidebar.toggle(
-    "🎸 Shredder voice", value=ss.get("copilot_voice", True),
+    "Shredder voice", value=ss.get("copilot_voice", True),
     help="Trash talk, position-run alarms, villain narration, and your squad's "
          "earned nickname. Turn off for a quiet board.")
 ss.alerts_on = st.sidebar.toggle(
