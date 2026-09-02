@@ -58,6 +58,18 @@ try:
 except Exception:  # noqa: BLE001
     SL = None
 try:
+    import live_games as LG      # live scoreboard + betting-edge (model vs market)
+except Exception:  # noqa: BLE001
+    LG = None
+try:
+    import odds_feed as OF       # multi-book odds + player props (The Odds API)
+except Exception:  # noqa: BLE001
+    OF = None
+try:
+    import prob_history as PH    # log model-vs-market probs, settle, calibrate
+except Exception:  # noqa: BLE001
+    PH = None
+try:
     import live_feed as _LF
     _norm = _LF._norm
 except Exception:  # noqa: BLE001
@@ -2159,8 +2171,10 @@ hc[2].metric("Your next pick",
 hc[3].metric("Your players", f"{len(_mine)}/{int(rounds)}")
 
 # top-level view switch: live draft board · full rankings cheat sheet · weekly start/sit
-_view = st.radio("View",
-                 ["🎯 Draft board", "📋 Rankings guide", "📅 Weekly lineup"],
+_VIEWS = ["🎯 Draft board", "📋 Rankings guide", "📅 Weekly lineup"]
+if LG is not None:
+    _VIEWS.append("📈 Betting edge")
+_view = st.radio("View", _VIEWS,
                  horizontal=True, label_visibility="collapsed", key="top_view")
 
 if mode == "ESPN" and ss.espn and not ss.peek_mode:
@@ -2347,6 +2361,331 @@ def _render_weekly_lineup():
         for s in bench_rows:
             _row(s, dim=True)
 
+
+def _render_betting_edge():
+    """Betting hub. All the model-vs-market tooling, split into tabs so it's not
+    one long scroll: the live Slate (our win prob vs the book), the multi-book
+    Line shop & player props, and the Model report card (calibration). Purely a
+    divergence read; not betting advice."""
+    st.markdown("#### 📈 Betting edge")
+    _tab_slate, _tab_shop, _tab_card = st.tabs(
+        ["🎯 Slate", "🛒 Line shop & props", "📊 Report card"])
+    with _tab_slate:
+        _render_slate()
+    with _tab_shop:
+        _render_line_shop()
+    with _tab_card:
+        _render_report_card()
+
+
+def _render_slate():
+    """Model-vs-market read on today's NFL slate. For each game we compute our
+    OWN live win probability and compare it to the de-vigged book odds — where
+    they DISAGREE is the opportunity. Plus an Upset Radar for chalk in trouble."""
+    st.markdown("##### Our model vs the market")
+    st.caption("We compute each game's win probability from the live state, then "
+               "strip the book's vig from the moneylines for a fair comparison. "
+               "A gap between the two is where the market and the model disagree. "
+               "Informational only — not betting advice.")
+
+    if LG is None:
+        st.info("Live-games module unavailable (needs the `requests` package).")
+        return
+
+    if st.button("🔄 Refresh slate"):
+        st.rerun()
+
+    with st.spinner("Pulling the live NFL slate…"):
+        try:
+            games = LG.fetch_live_games()
+        except Exception as ex:  # noqa: BLE001
+            st.error(f"Couldn't reach the scoreboard: {ex}")
+            return
+
+    # log model-vs-market snapshots for later calibration (best-effort, silent)
+    if PH is not None and games:
+        try:
+            PH.snapshot(games)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not games:
+        st.info("No games on the board right now (off-day, or the slate hasn't "
+                "posted). Check back on game day — this fills in with live win "
+                "probabilities and edges once games are scheduled.")
+        return
+
+    live_n = sum(1 for g in games if g.status == "in")
+    edges = [g for g in games if abs(g.edge_fav) >= 0.05
+             and g.model_p_fav is not None]
+    hot = [g for g in games if g.upset_heat >= 40 and g.status == "in"]
+
+    mc = st.columns(3)
+    mc[0].metric("Games", len(games))
+    mc[1].metric("Live now", live_n)
+    mc[2].metric("Edges flagged", len(edges))
+
+    # ---- Upset Radar (chalk in trouble) ----
+    if hot:
+        st.markdown("##### 🚨 Upset radar")
+        for g in sorted(hot, key=lambda x: -x.upset_heat):
+            st.markdown(
+                f'<div class="insight i-cliff"><div class="it">{g.upset_note}</div>'
+                f'<div class="ib">heat {int(g.upset_heat)}/100 · {g.away} '
+                f'{g.away_score} @ {g.home} {g.home_score}</div></div>',
+                unsafe_allow_html=True)
+
+    # ---- Per-game edge table ----
+    st.markdown("##### Slate")
+    # value edges first, then live, then the rest
+    games_sorted = sorted(
+        games, key=lambda g: (abs(g.edge_fav) < 0.05, g.status != "in",
+                              -abs(g.edge_fav)))
+    for g in games_sorted:
+        head = f"{g.away} {g.away_score} @ {g.home} {g.home_score}"
+        line = g.spread or "—"
+        with st.container(border=True):
+            c = st.columns([2.4, 1, 1, 1.3])
+            c[0].markdown(
+                f'<b>{head}</b><br><span class="pmeta">{g.detail} · line {line}'
+                + (f" · O/U {g.over_under}" if g.over_under else "")
+                + '</span>', unsafe_allow_html=True)
+            if g.model_p_fav is not None:
+                c[1].markdown(
+                    f'<div class="pmeta">MODEL</div>'
+                    f'<b>{int(g.model_p_fav*100)}%</b>', unsafe_allow_html=True)
+                c[2].markdown(
+                    f'<div class="pmeta">MARKET</div>'
+                    f'<b>{int((g.market_p_fav or 0)*100)}%</b>',
+                    unsafe_allow_html=True)
+                if abs(g.edge_fav) >= 0.05 and g.edge_note:
+                    _cls = "vr-value" if "FAVORITE" in g.edge_note else "vr-reach"
+                    c[3].markdown(
+                        f'<span class="vr {_cls}">{g.edge_note} '
+                        f'{"+" if g.edge_fav>=0 else ""}{int(g.edge_fav*100)}%</span>',
+                        unsafe_allow_html=True)
+                else:
+                    c[3].markdown('<span class="pmeta">no clear edge</span>',
+                                  unsafe_allow_html=True)
+            else:
+                c[1].markdown('<span class="pmeta">no line yet</span>',
+                              unsafe_allow_html=True)
+            # possession / drives-left (live games only)
+            if g.possession_note:
+                _ball = (f"🏈 {g.possessing_team} has the ball · "
+                         if g.possessing_team else "")
+                _fd = g.fav_drives_left
+                _dd = g.dog_drives_left
+                _drv = ""
+                if _fd is not None and _dd is not None:
+                    _drv = (f"{g.favorite} ~{_fd} drives left vs "
+                            f"~{_dd} for the other side")
+                st.markdown(
+                    f'<div class="pmeta">{_ball}{_drv}</div>',
+                    unsafe_allow_html=True)
+    st.caption("MODEL = our live win prob for the favorite · MARKET = the same "
+               "from de-vigged book odds · edge = model − market. When a game is "
+               "live, the model is possession-aware: it counts each team's "
+               "remaining scoring drives (who has the ball + drive-pace) instead "
+               "of raw clock.")
+
+
+def _fmt_ml(ml):
+    """American moneyline -> display string with sign."""
+    if ml is None:
+        return "—"
+    ml = int(ml)
+    return f"+{ml}" if ml > 0 else str(ml)
+
+
+def _render_line_shop():
+    """Compare DraftKings / FanDuel / BetMGM on each game (best price + book-vs-
+    consensus divergence), then drill into player props for a chosen game. Powered
+    by The Odds API; needs an API key. Informational only — not betting advice."""
+    st.markdown("##### Line shop & player props")
+
+    if OF is None:
+        st.info("Odds module unavailable.")
+        return
+    if not OF.configured():
+        st.info("No Odds API key set. Add one to `.streamlit/secrets.toml` "
+                "under `[odds_api] api_key = \"…\"` (get a free key at "
+                "the-odds-api.com) to compare DraftKings / FanDuel / BetMGM and "
+                "pull player props.")
+        return
+
+    st.caption("Same game across DraftKings, FanDuel and BetMGM. BEST = the book "
+               "paying the most on each side (line-shopping). DIVERGENCE = a book "
+               "pricing a side away from the market consensus. Player props are "
+               "opt-in per game (each pull uses a few API credits).")
+
+    if st.button("🔄 Refresh odds (uses API credits)"):
+        st.session_state.pop("_odds_games", None)
+        st.session_state.pop("_odds_props", None)
+        st.rerun()
+
+    if "_odds_games" not in st.session_state:
+        with st.spinner("Pulling multi-book odds…"):
+            try:
+                st.session_state["_odds_games"] = OF.fetch_game_odds()
+            except Exception as ex:  # noqa: BLE001
+                st.error(f"Couldn't reach the odds API: {ex}")
+                return
+    games = st.session_state.get("_odds_games") or []
+
+    q = OF.last_quota
+    if q.get("remaining") is not None:
+        st.caption(f"API credits remaining: {q['remaining']} "
+                   f"(last call cost {q.get('last_cost')})")
+
+    if not games:
+        st.info("No games returned (off-season, or the slate hasn't posted).")
+        return
+
+    # ---- per-game line-shop table ----
+    st.markdown("##### Game odds — best price by book (current week)")
+    for g in games:
+        with st.container(border=True):
+            head = f"{g.away} @ {g.home}"
+            sub = (f"fav {g.favorite}" if g.favorite else "")
+            if g.consensus_p_fav is not None:
+                sub += f" · consensus {int(g.consensus_p_fav*100)}% to win"
+            st.markdown(f"<b>{head}</b><br><span class='pmeta'>{sub}</span>",
+                        unsafe_allow_html=True)
+            cc = st.columns(2)
+            cc[0].markdown(
+                f"<div class='pmeta'>BEST ON {g.favorite}</div>"
+                f"<b>{_fmt_ml(g.best_fav_ml)}</b> "
+                f"<span class='pmeta'>@ {g.best_fav_ml_book or '—'}</span>",
+                unsafe_allow_html=True)
+            cc[1].markdown(
+                f"<div class='pmeta'>BEST ON {g.dog}</div>"
+                f"<b>{_fmt_ml(g.best_dog_ml)}</b> "
+                f"<span class='pmeta'>@ {g.best_dog_ml_book or '—'}</span>",
+                unsafe_allow_html=True)
+            if g.divergence_note:
+                st.markdown(f"<div class='pmeta'>↔ {g.divergence_note}</div>",
+                            unsafe_allow_html=True)
+
+    # ---- player props drill-down ----
+    st.markdown("##### Player props")
+    labels = [f"{g.away} @ {g.home}" for g in games]
+    choice = st.selectbox("Pick a game to pull props (uses API credits)",
+                          ["— select —"] + labels, key="_prop_pick")
+    if choice and choice != "— select —":
+        gi = labels.index(choice)
+        g = games[gi]
+        cache = st.session_state.setdefault("_odds_props", {})
+        if g.event_id not in cache:
+            with st.spinner(f"Pulling props for {choice}…"):
+                try:
+                    cache[g.event_id] = OF.fetch_player_props(g.event_id)
+                except Exception as ex:  # noqa: BLE001
+                    st.error(f"Couldn't pull props: {ex}")
+                    cache[g.event_id] = []
+        props = cache.get(g.event_id) or []
+        if not props:
+            st.info("No props posted for this game yet (yardage lines usually "
+                    "open closer to kickoff; anytime-TD markets post first).")
+        else:
+            # group by market for readability
+            by_market: dict[str, list] = {}
+            for pp in props:
+                by_market.setdefault(pp.market_label, []).append(pp)
+            for mlabel in sorted(by_market):
+                st.markdown(f"**{mlabel}**")
+                for pp in by_market[mlabel][:40]:
+                    line = (f"line {pp.consensus_point:g}"
+                            if pp.consensus_point is not None else "")
+                    over = (f"O {_fmt_ml(pp.best_over_price)}@{pp.best_over_book}"
+                            if pp.best_over_price is not None else "")
+                    under = (f"U {_fmt_ml(pp.best_under_price)}@{pp.best_under_book}"
+                             if pp.best_under_price is not None else "")
+                    bits = " · ".join(b for b in (line, over, under) if b)
+                    div = (f" · ↔ {pp.divergence_note}"
+                           if pp.divergence_note else "")
+                    st.markdown(
+                        f"<div class='pmeta'><b>{pp.player}</b> — {bits}{div}</div>",
+                        unsafe_allow_html=True)
+
+
+def _render_report_card():
+    """How well has our model tracked reality vs the market? Brier score is the
+    north star: if the de-vigged market beats our model, the edges we flag are
+    noise. Calibration shows whether 'we said 70%' actually meant ~70%."""
+    st.markdown("##### Model report card — are our edges real?")
+
+    if PH is None:
+        st.info("History module unavailable.")
+        return
+
+    stx = PH.stats()
+    st.caption(
+        f"Logged {stx['total_records']} snapshots across {stx['distinct_events']} "
+        f"games · {stx['settled_records']} settled with final scores. We log the "
+        "model-vs-market probability every time this view refreshes, then grade "
+        "it once games finish. Not betting advice.")
+
+    if st.button("✅ Settle finished games"):
+        try:
+            n = PH.settle()
+            st.success(f"Settled {n} newly-final game record(s).")
+        except Exception as ex:  # noqa: BLE001
+            st.error(f"Couldn't settle: {ex}")
+        st.rerun()
+
+    kind = st.radio("Scope", ["all", "pregame", "live", "poss_aware"],
+                    horizontal=True, key="_rc_kind",
+                    format_func=lambda k: {"all": "All", "pregame": "Pregame",
+                                           "live": "Live", "poss_aware":
+                                           "Possession-aware"}[k])
+    rep = PH.score(kind)
+
+    if rep["n"] == 0:
+        st.info("No settled games yet. Once games finish and you hit "
+                "‘Settle finished games’, the model gets graded here — Brier "
+                "score, calibration, and whether it beats the market.")
+        return
+
+    # headline: model vs market Brier
+    mc = st.columns(3)
+    mc[0].metric("Settled games", rep["n"])
+    mc[1].metric("Model Brier", rep["model_brier"],
+                 help="Mean squared error of our P(fav) vs outcome. Lower is better.")
+    mc[2].metric("Market Brier", rep["market_brier"],
+                 delta=(f"{rep['brier_delta']:+.3f} vs model"
+                        if rep["brier_delta"] is not None else None),
+                 delta_color="inverse",
+                 help="Same, for the de-vigged book line. The number to beat.")
+
+    _beat = (rep["model_brier"] is not None and rep["market_brier"] is not None
+             and rep["model_brier"] < rep["market_brier"])
+    _cls = "vr-value" if _beat else "vr-reach"
+    st.markdown(f'<span class="vr {_cls}">{rep["verdict"]}</span>',
+                unsafe_allow_html=True)
+
+    # calibration table
+    if rep["calibration"]:
+        st.markdown("##### Calibration — did our % mean what it said?")
+        st.caption("For each model-probability bucket: what we predicted on "
+                   "average vs how often the favorite actually won. Close = "
+                   "well-calibrated; a big gap = the model is over/under-confident "
+                   "in that range.")
+        import pandas as _pd
+        df = _pd.DataFrame(rep["calibration"])
+        df = df.rename(columns={"bucket": "Model says", "n": "Games",
+                                "predicted": "Predicted", "actual": "Actual won",
+                                "gap": "Gap (actual−pred)"})
+        st.dataframe(df, hide_index=True, use_container_width=True)
+
+    st.caption("This measures the model; it does not retrain it. Once enough "
+               "games accumulate, the calibration gaps tell us which win-prob "
+               "constants to re-tune.")
+
+
+if _view == "📈 Betting edge":
+    _render_betting_edge()
+    st.stop()
 
 if _view == "📋 Rankings guide":
     _render_rankings()

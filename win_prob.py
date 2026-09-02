@@ -44,24 +44,64 @@ def _seconds_left(quarter: int, clock: str) -> float:
     return min(_SECONDS_TOTAL, quarters_after * 900.0 + q_left)
 
 
+# Per-drive scoring: NFL teams average ~1.8-2.1 pts/drive; SD of points on a
+# single drive is ~2.6. Used only when possession/drive data is supplied.
+_PTS_PER_DRIVE = 1.9
+_PTS_SD_PER_DRIVE = 2.6
+
+
 def live_win_prob(fav_margin: float, fav_spread: float,
-                  quarter: int, clock: str) -> float:
+                  quarter: int, clock: str,
+                  fav_drives_left: Optional[float] = None,
+                  dog_drives_left: Optional[float] = None,
+                  fav_pts_per_drive: float = _PTS_PER_DRIVE,
+                  dog_pts_per_drive: float = _PTS_PER_DRIVE) -> float:
     """Model P(favorite wins) from live state.
+
     fav_margin  = favorite's current score - underdog's (can be negative)
     fav_spread  = pregame points the fav was favored by (positive)
-    Returns 0-1."""
+
+    POSSESSION-AWARE MODE (when fav_drives_left / dog_drives_left are given):
+    Football is discrete possessions, not smooth time. Instead of scaling
+    uncertainty by raw clock, we scale it by how many scoring DRIVES each team
+    still gets. Fewer drives left -> the current margin locks in faster, and a
+    trailing team with almost no drives left is in far more trouble than the
+    clock alone implies. The expected final margin also gets a small push from
+    each team's expected points over its remaining drives.
+
+    CLOCK-ONLY MODE (default, drives omitted): the original logistic on the
+    spread-blended margin with sqrt(time) variance — unchanged, backward-compatible.
+
+    Returns 0-1.
+    """
     sec_left = _seconds_left(quarter, clock)
     frac_left = sec_left / _SECONDS_TOTAL          # 1.0 pregame -> 0 at end
-    frac_done = 1.0 - frac_left
 
     # expected final margin: current score + spread's expectation over what's left,
     # weighted so the spread prior fades as the game plays out.
     remaining_spread_pull = fav_spread * frac_left
-    # blend current margin (weighted by time done) with the spread prior
     expected_final = fav_margin + remaining_spread_pull
 
-    # uncertainty shrinks with less time left (SD scales with sqrt of time left)
-    sd = max(3.0, _GAME_SD * math.sqrt(max(frac_left, 0.02)))
+    have_drives = (fav_drives_left is not None and dog_drives_left is not None)
+    if have_drives:
+        fd = max(0.0, float(fav_drives_left))
+        dd = max(0.0, float(dog_drives_left))
+
+        # Expected-points nudge: each remaining drive is worth ~pts_per_drive.
+        # This is a light touch on top of the spread prior (which already carries
+        # team strength), so we damp it to avoid double-counting.
+        _EP_WEIGHT = 0.5
+        expected_final += _EP_WEIGHT * (fd * fav_pts_per_drive
+                                        - dd * dog_pts_per_drive)
+
+        # Possession-count variance: remaining uncertainty is the points still to
+        # be decided across all remaining drives. SD grows with sqrt(total drives).
+        total_drives = fd + dd
+        sd = max(3.0, _PTS_SD_PER_DRIVE * math.sqrt(max(total_drives, 0.25)))
+    else:
+        # original clock-only variance (unchanged)
+        sd = max(3.0, _GAME_SD * math.sqrt(max(frac_left, 0.02)))
+
     p = 1.0 / (1.0 + math.exp(-expected_final / sd))
     return max(0.01, min(0.99, p))
 

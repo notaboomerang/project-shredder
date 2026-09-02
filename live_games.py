@@ -18,13 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-try:
-    import requests
-except ImportError:
-    requests = None  # type: ignore
+import espn_http as _http
 
 _SB = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ProjectShredder/1.0"
 
 
 @dataclass
@@ -50,17 +46,17 @@ class LiveGame:
     edge_note: str = ""
     upset_heat: float = 0.0
     upset_note: str = ""
+    # possession/drive-based opportunity (live games only; None when unavailable)
+    possessing_team: Optional[str] = None   # team abbrev with the ball right now
+    fav_drives_left: Optional[float] = None # est. scoring drives left for the fav
+    dog_drives_left: Optional[float] = None # est. scoring drives left for the dog
+    possession_note: str = ""               # human-readable possession summary
 
 
 def _get() -> dict:
-    if requests is None:
-        return {}
-    try:
-        r = requests.get(_SB, headers={"User-Agent": _UA}, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {}
+    # Routes through espn_http (curl_cffi browser-impersonation) to defeat the
+    # Akamai TLS-fingerprint 403 that blocks plain requests.
+    return _http.get_json(_SB, timeout=10)
 
 
 def _upset(fav: str, favpts: float, home: str, away: str,
@@ -88,6 +84,49 @@ def _upset(fav: str, favpts: float, home: str, away: str,
     when = f"Q{quarter} {clock}" if clock else f"Q{quarter}"
     note = f"🚨 {fav} (−{favpts:g} fav) TRAILING by {deficit} in {when}"
     return round(heat, 0), note
+
+
+def _possession_drives(event_id: str, favorite: str, dog_team: str,
+                       home: str, away: str, hs: int, as_: int,
+                       quarter: int, clock: str, fav_is_home: bool
+                       ) -> tuple[Optional[float], Optional[float],
+                                  Optional[str], str]:
+    """For a live game, fetch who has the ball and estimate scoring drives left
+    for the favorite and underdog. Returns (fav_drives, dog_drives, possessing
+    team abbrev, note). All None/'' if drive data is unavailable — the caller
+    then falls back to the clock-only win-prob model.
+    """
+    try:
+        import drive_data as DD
+    except Exception:
+        return None, None, None, ""
+
+    lp = DD.fetch_live_possession(event_id)
+    # who has the ball, mapped to 'fav' / 'dog'
+    possessing = None
+    poss_abbr = lp.possessing_team if lp.ok else None
+    if poss_abbr == favorite:
+        possessing = "fav"
+    elif poss_abbr == dog_team:
+        possessing = "dog"
+
+    # favorite leading? (drives_left_for_game picks the right script split)
+    fav_margin = (hs - as_) if fav_is_home else (as_ - hs)
+    fav_is_leading = fav_margin >= 0
+
+    try:
+        pl = DD.drives_left_for_game(
+            quarter, clock, favorite, dog_team,
+            fav_is_leading=fav_is_leading, possessing=possessing)
+    except Exception:
+        return None, None, poss_abbr, ""
+
+    note = ""
+    if poss_abbr:
+        note = f"{poss_abbr} has the ball · {favorite}≈{pl.fav_drives_left} / {dog_team}≈{pl.dog_drives_left} drives left"
+    else:
+        note = f"{favorite}≈{pl.fav_drives_left} / {dog_team}≈{pl.dog_drives_left} drives left"
+    return pl.fav_drives_left, pl.dog_drives_left, poss_abbr, note
 
 
 def fetch_live_games() -> list[LiveGame]:
@@ -136,14 +175,27 @@ def fetch_live_games() -> list[LiveGame]:
             home_ml = hto.get("moneyLine")
             away_ml = ato.get("moneyLine")
 
+        # ---- possession / drives-left (live games only) ----
+        possessing_team = None
+        fav_drives = dog_drives = None
+        poss_note = ""
+        fav_is_home = (favorite == home) if favorite else True
+        dog_team = (away if fav_is_home else home) if favorite else ""
+        if state == "in" and favorite and favpts > 0:
+            fav_drives, dog_drives, possessing_team, poss_note = _possession_drives(
+                ev.get("id", ""), favorite, dog_team, home, away,
+                hs, as_, quarter, clock, fav_is_home)
+
         # ---- OUR live win-prob vs the market (the edge) ----
         import win_prob as WP_
         model_pf = market_pf = None
         edge_v, edge_nt = 0.0, ""
         if favorite and favpts > 0:
-            fav_is_home = (favorite == home)
             fav_margin = (hs - as_) if fav_is_home else (as_ - hs)
-            model_pf = WP_.live_win_prob(fav_margin, favpts, quarter, clock)
+            # possession-aware when we have drive data; else clock-only (backward-compat)
+            model_pf = WP_.live_win_prob(
+                fav_margin, favpts, quarter, clock,
+                fav_drives_left=fav_drives, dog_drives_left=dog_drives)
             # market prob: prefer de-vigged moneylines, else the spread
             fav_ml = home_ml if fav_is_home else away_ml
             dog_ml = away_ml if fav_is_home else home_ml
@@ -163,7 +215,11 @@ def fetch_live_games() -> list[LiveGame]:
             model_p_fav=(round(model_pf, 3) if model_pf is not None else None),
             market_p_fav=(round(market_pf, 3) if market_pf is not None else None),
             edge_fav=edge_v, edge_note=edge_nt,
-            upset_heat=heat, upset_note=note))
+            upset_heat=heat, upset_note=note,
+            possessing_team=possessing_team,
+            fav_drives_left=(round(fav_drives, 2) if fav_drives is not None else None),
+            dog_drives_left=(round(dog_drives, 2) if dog_drives is not None else None),
+            possession_note=poss_note))
     # live games first, then by upset heat
     games.sort(key=lambda g: (g.status != "in", -g.upset_heat))
     return games
