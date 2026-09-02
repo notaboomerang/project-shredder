@@ -626,11 +626,30 @@ def _render_watch_help():
 
 @st.cache_data(show_spinner="Loading player projections…")
 def _load_pool():
-    return P.load_players(prefer_live=True)
+    # Always prefer the FULL live board; capture the source so we can warn if we
+    # silently fell back to the tiny bundled seed (never draft blind on ~34 players).
+    return P.load_players_with_source(prefer_live=True)
 
 
-pool = _load_pool()
+pool, _pool_source = _load_pool()
 name_to_raw = {p.name: p for p in pool}
+
+# Loud, unmissable warning if we're NOT on the full live board — so a real draft
+# is never silently run on the small seed fallback. A "reload" clears the cache.
+if _pool_source != "live":
+    _n = len(pool)
+    _msg = ("⚠️ **Running on the bundled backup player list** "
+            f"({_n} players), not the full live board — the live projection feed "
+            "couldn't be reached. Rankings will be limited. Check your connection "
+            "and reload."
+            if _pool_source == "seed" else
+            "⚠️ **No player data loaded.** The live feed failed and no backup list "
+            "was found. Reload to retry.")
+    _wc = st.columns([5, 1])
+    _wc[0].warning(_msg)
+    if _wc[1].button("🔄 Reload data"):
+        _load_pool.clear()
+        st.rerun()
 
 
 def _render_masthead():

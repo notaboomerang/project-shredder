@@ -41,15 +41,28 @@ class RawPlayer:
 
 
 def load_players(prefer_live: bool = True) -> list[RawPlayer]:
-    """Return the player pool. Tries live, falls back to seed. Never raises."""
+    """Return the player pool. Tries live, falls back to seed. Never raises.
+    Back-compat wrapper; use load_players_with_source() when you need to know
+    whether you're on the full live board or the tiny bundled seed."""
+    pool, _src = load_players_with_source(prefer_live=prefer_live)
+    return pool
+
+
+def load_players_with_source(prefer_live: bool = True) -> tuple[list[RawPlayer], str]:
+    """Like load_players but ALSO returns which source served the pool:
+      "live"  — full FantasyPros board (what a real draft should run on)
+      "seed"  — the small bundled fallback (network/live fetch failed)
+      "empty" — nothing available (no seed file either)
+    Callers can warn the user so a draft is never SILENTLY run on the seed."""
     if prefer_live and requests is not None:
         try:
             live = _fetch_live()
             if live:
-                return live
+                return live, "live"
         except Exception:
             pass
-    return _load_seed()
+    seed = _load_seed()
+    return (seed, "seed") if seed else ([], "empty")
 
 
 def _load_seed() -> list[RawPlayer]:
