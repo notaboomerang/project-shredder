@@ -753,7 +753,13 @@ def _render_mobile_mode_picker():
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-if not st.session_state.get("peek_mode"):
+if _BETTING_ONLY:
+    # betting-only screen: no draft-mode picker, and hide the draft sidebar
+    # entirely (its widgets still run to set defaults, just not shown).
+    st.markdown("<style>[data-testid='stSidebar']{display:none !important;}"
+                "[data-testid='collapsedControl']{display:none !important;}</style>",
+                unsafe_allow_html=True)
+elif not st.session_state.get("peek_mode"):
     _render_mobile_mode_picker()
 else:
     # Peek mode is a clean, read-only mirror — hide the sidebar entirely so the
