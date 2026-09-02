@@ -249,6 +249,11 @@ class PlayerValue:
     tier: int = 0
     adp: Optional[float] = None
     value_vs_adp: Optional[float] = None   # +ve = value (ranks ahead of ADP)
+    # TE (and RB/WR) are evaluated TWICE: once at their own position, once in the
+    # shared FLEX pool vs all RB/WR/TE. vorp = the better of the two (easier line
+    # to clear). These expose each component for display / debugging.
+    vorp_pos: float = 0.0                  # value vs own-position replacement
+    vorp_flex: Optional[float] = None      # value vs the combined FLEX line (None if not flex-eligible)
 
 
 def compute_vorp(players: list[PlayerValue], cfg: LeagueConfig) -> list[PlayerValue]:
@@ -276,22 +281,50 @@ def compute_vorp(players: list[PlayerValue], cfg: LeagueConfig) -> list[PlayerVa
     for p in players:
         by_pos.setdefault(p.position, []).append(p)
 
+    # STREAMABLE / single-start positions: you start only ONE and a late-tier
+    # option scores nearly as much, so their value-over-replacement must be
+    # SMALL — otherwise a high-raw-scoring QB (Josh Allen) or an elite DST floats
+    # to the top of the board and looks like a round-1 pick, which it isn't in a
+    # 1-QB league. We set their replacement to a SHALLOW rank (near the best),
+    # i.e. a HIGH points floor, which collapses elite-QB/DST/K VORP so RB/WR/TE
+    # win the early rounds. In SUPERFLEX/OP leagues QB is a real weekly need, so
+    # we DON'T shallow-cap QB there. Ranks mirror the strategy simulator.
+    # (TE is NOT shallow-capped — it rides the combined FLEX line above, which is
+    # what keeps a lone elite TE valued while a 2nd TE grades as bench.)
+    _superflex = any(sl in ("SUPERFLEX", "OP") and c for sl, c in cfg.starters.items())
+    shallow = {"DST": 4, "K": 4}
+    if not _superflex:
+        shallow["QB"] = 8   # ~QB8's points as the replacement in a 1-QB league
+
     for pos, plist in by_pos.items():
         plist.sort(key=lambda x: x.proj_points, reverse=True)
         base_rank = baselines.get(pos, len(plist))
         idx = min(base_rank, len(plist)) - 1
         dedicated_pts = plist[idx].proj_points if plist else 0.0
-        # For a flex-eligible position, the true replacement is the SINGLE
-        # combined-flex line (the marginal flex starter pooled across RB/WR/TE) —
-        # that's the real opportunity cost of a starting-caliber flex body. This
-        # unifies RB/WR/TE onto one line: a deep, shallow position (TE) is judged
-        # against the same flex bar as RB/WR, so only genuinely flex-worthy TEs
-        # carry positive value and a stockpiled 2nd TE grades as bench.
+        # Streamable single-start positions (QB in 1-QB, DST, K): use a SHALLOW
+        # replacement (near the top of the pool) so elite raw scorers don't
+        # dominate the board — their edge over a streamed option is tiny.
+        if pos in shallow and plist:
+            sidx = min(shallow[pos], len(plist)) - 1
+            dedicated_pts = max(dedicated_pts, plist[sidx].proj_points)
+
+        # DUAL EVALUATION for flex-eligible players: value them (1) at their own
+        # position and (2) in the combined FLEX pool vs all active RB/WR/TE. A
+        # player earns a starting spot by clearing EITHER line, so their true
+        # value-over-replacement is measured against the EASIER (lower) line.
+        # This keeps a scarce elite TE valuable on its own positional line while
+        # also crediting the flex it can win — and RB/WR get the same treatment.
         fl = _flex_line_for(pos)
-        base_pts = fl if fl is not None else dedicated_pts
         for i, p in enumerate(plist, start=1):
             p.pos_rank = i
-            p.vorp = round(p.proj_points - base_pts, 1)
+            p.vorp_pos = round(p.proj_points - dedicated_pts, 1)
+            if fl is not None:
+                p.vorp_flex = round(p.proj_points - fl, 1)
+                # best of the two lines = value against the easier bar to start
+                p.vorp = max(p.vorp_pos, p.vorp_flex)
+            else:
+                p.vorp_flex = None
+                p.vorp = p.vorp_pos
 
     players.sort(key=lambda x: x.vorp, reverse=True)
     _assign_tiers(players)
