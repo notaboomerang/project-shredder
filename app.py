@@ -337,6 +337,7 @@ def _init_state():
     ss.setdefault("dna_seasons", "2021,2022,2023,2024,2025")
     ss.setdefault("_manual_tendencies", {})  # {slot: {tendencies, rookie_averse}}
     ss.setdefault("_cookie_loaded", False)
+    ss.setdefault("alerts_on", True)         # sound + vibrate when you're on the clock
     ss.setdefault("intent", "")              # "" until the first-run gate is answered
     ss.setdefault("peek_mode", False)        # read-only phone mirror of a live draft
     ss.setdefault("_peek_league", "")        # league id carried in the peek link
@@ -903,6 +904,114 @@ def _is_live_runtime():
         return _rt.exists()
     except Exception:  # noqa: BLE001
         return False
+
+
+def _picks_until_my_turn(cfg):
+    """How many picks until it's MY slot on the clock (0 = right now, 1 = next).
+    Uses the app's single source of truth: current_overall + snake-slot mapping.
+    Returns None past the end of the draft."""
+    try:
+        teams = int(cfg.teams)
+        my_slot = int(cfg.draft_slot)
+        cur = int(ss.get("current_overall", 1))
+        last = teams * int(cfg.rounds)
+    except Exception:  # noqa: BLE001
+        return None
+    for k in range(0, teams + 1):          # at most one full round away
+        ov = cur + k
+        if ov > last:
+            return None
+        if O._snake_slot(ov, teams) == my_slot:
+            return k
+    return None
+
+
+def _is_my_turn(cfg):
+    """True when MY slot owns the pick currently on the clock."""
+    return _picks_until_my_turn(cfg) == 0
+
+
+def _render_on_the_clock_alert(cfg):
+    """The headline copilot feature: the moment it's YOUR pick, throw a big
+    banner, start a count-up timer, play a chime, and buzz the phone. When you're
+    1-2 picks away it shows a calmer 'get ready' heads-up instead. Fires the
+    sound/vibrate ONCE per turn (guarded in-browser keyed on the overall pick #),
+    and respects the alerts on/off toggle. Works the same on the main draft view
+    and the read-only phone peek - that's the payoff for glancing at your phone."""
+    k = _picks_until_my_turn(cfg)
+    if k is None:
+        return
+    cur = int(ss.get("current_overall", 1))
+    alerts_on = bool(ss.get("alerts_on", True))
+
+    if k == 0:
+        if ss.get("_clock_turn_overall") != cur:
+            ss["_clock_turn_overall"] = cur
+        _render_clock_component(cur, alerts_on)
+    elif k <= 2:
+        who = "1 pick" if k == 1 else f"{k} picks"
+        st.markdown(
+            f'<div style="background:linear-gradient(100deg,#1a2233,#12261f);'
+            f'border:1px solid #2f5aa0;border-radius:12px;padding:10px 14px;'
+            f'margin:6px 0;color:#cfe0ff;font-weight:700;">&#9203; Get ready - '
+            f"you're <b>{who}</b> away. Line up your pick.</div>",
+            unsafe_allow_html=True)
+
+
+def _render_clock_component(overall, alerts_on):
+    """In-browser banner + count-up timer + one-shot chime + vibrate. The chime
+    only plays once per overall pick number (stored in sessionStorage) so silent
+    auto-refreshes don't re-trigger it."""
+    import streamlit.components.v1 as _components
+    play = "true" if alerts_on else "false"
+    _components.html(f"""
+<div id="otc" style="background:linear-gradient(100deg,#3a1020,#10261f);
+   border:2px solid #ff5470;border-radius:14px;padding:16px 18px;margin:4px 0;
+   box-shadow:0 0 34px rgba(255,84,112,.35);font:-apple-system,Segoe UI,Roboto,sans-serif;">
+  <div style="font:800 13px 'JetBrains Mono',monospace;letter-spacing:2px;color:#ff8fa3;">
+     &#128293; YOU'RE ON THE CLOCK</div>
+  <div style="font-size:26px;font-weight:800;color:#fff;margin-top:2px;">
+     Make your pick</div>
+  <div style="margin-top:4px;color:#ffd6de;font-weight:700;">
+     on the clock for <span id="otc_t">0:00</span></div>
+</div>
+<script>
+(function(){{
+  var OV = "{overall}", PLAY = {play};
+  var key = 'otc_start_'+OV;
+  var start = parseInt(sessionStorage.getItem(key)||'0',10);
+  if(!start){{ start = Date.now(); sessionStorage.setItem(key, String(start)); }}
+  function tick(){{
+    var s = Math.floor((Date.now()-start)/1000);
+    var m = Math.floor(s/60), r = s%60;
+    var el = document.getElementById('otc_t');
+    if(el) el.textContent = m+':'+(r<10?'0':'')+r;
+  }}
+  tick(); setInterval(tick, 1000);
+  var akey = 'otc_alerted_'+OV;
+  if(PLAY && !sessionStorage.getItem(akey)){{
+    sessionStorage.setItem(akey,'1');
+    try{{ if(navigator.vibrate) navigator.vibrate([220,90,220,90,320]); }}catch(e){{}}
+    try{{
+      var Ctx = window.AudioContext||window.webkitAudioContext;
+      if(Ctx){{
+        var ac=new Ctx();
+        [880,1320,1760].forEach(function(f,i){{
+          var o=ac.createOscillator(), g=ac.createGain();
+          o.type='sine'; o.frequency.value=f;
+          var t0=ac.currentTime+i*0.16;
+          g.gain.setValueAtTime(0.0001,t0);
+          g.gain.exponentialRampToValueAtTime(0.28,t0+0.03);
+          g.gain.exponentialRampToValueAtTime(0.0001,t0+0.30);
+          o.connect(g); g.connect(ac.destination);
+          o.start(t0); o.stop(t0+0.33);
+        }});
+      }}
+    }}catch(e){{}}
+  }}
+}})();
+</script>
+""", height=140)
 
 
 def _sync_espn(cfg, force=False):
@@ -1560,6 +1669,10 @@ ss.copilot_voice = st.sidebar.toggle(
     "🎸 Shredder voice", value=ss.get("copilot_voice", True),
     help="Trash talk, position-run alarms, villain narration, and your squad's "
          "earned nickname. Turn off for a quiet board.")
+ss.alerts_on = st.sidebar.toggle(
+    "🔔 On-the-clock alert (sound + buzz)", value=ss.get("alerts_on", True),
+    help="When it's YOUR pick, Shredder throws a banner, chimes, and vibrates "
+         "your phone so you never miss being on the clock.")
 
 starters = {"QB": qb, "RB": rb, "WR": wr, "TE": te, "FLEX": flex, "DST": dst, "K": k}
 
@@ -1956,6 +2069,8 @@ if mode == "ESPN" and ss.espn and not ss.peek_mode:
     auto = sc[1].toggle("Auto-sync", value=False)
     if ss.get("sync_note"):
         sc[2].caption(ss.sync_note)
+    # ON THE CLOCK: big banner + chime + vibrate the instant it's your pick.
+    _render_on_the_clock_alert(cfg)
     if auto:
         _sync_espn(cfg)
         import time as _t
@@ -1966,9 +2081,15 @@ if mode == "ESPN" and ss.espn and not ss.peek_mode:
 # live draft from ESPN, and auto-refresh so picks appear on their own — no taps.
 if ss.peek_mode:
     if ss.espn:
-        st.info("👀 **Peek mode** — read-only mirror of your live draft. "
-                "Updates on its own; draft on your computer.")
+        pc = st.columns([3, 1])
+        pc[0].info("👀 **Peek mode** — read-only mirror of your live draft. "
+                   "Updates on its own; draft on your computer.")
+        ss.alerts_on = pc[1].toggle("🔔 Alerts", value=ss.get("alerts_on", True),
+                                    key="peek_alerts",
+                                    help="Sound + vibrate when you're on the clock.")
         _sync_espn(cfg)
+        # The payoff: buzz + banner on the phone the moment YOU'RE on the clock.
+        _render_on_the_clock_alert(cfg)
         # Auto-refresh so new picks appear on their own — only under a live server
         # (guarded so the test harness doesn't loop forever).
         if _is_live_runtime():
