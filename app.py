@@ -589,7 +589,7 @@ def _intent_gate():
 
     _render_masthead()
     st.markdown("### Welcome — how are you using Shredder right now?")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
             "#### 🎯 I'm drafting on this device\n"
@@ -608,8 +608,15 @@ def _intent_gate():
                      key="intent_watch"):
             ss.intent = "watch"
             st.rerun()
-    if ss.intent == "watch":
-        pass  # handled below after rerun
+    with c3:
+        st.markdown(
+            "#### 📈 Betting edge\n"
+            "Live NFL win-prob vs the market, multi-book line shopping, and player "
+            "props. No draft or login needed — jump straight in.")
+        if st.button("Betting edge", use_container_width=True,
+                     key="intent_betting"):
+            ss.intent = "betting"
+            st.rerun()
     st.caption("You can switch anytime from the sidebar.")
     st.stop()
 
@@ -715,6 +722,17 @@ if ss.get("intent") == "watch" and not ss.get("peek_mode"):
     _render_watch_help()
 
 _render_masthead()
+
+# Betting-edge shortcut (chosen from the welcome fork): skip ALL the ESPN/mock/
+# draft setup below and render only the betting hub. The render functions are
+# defined much further down, so we can't call them here — instead we set a flag,
+# render the back button now, and let the guarded blocks below skip straight to
+# the betting render that lives right after those functions are defined.
+_BETTING_ONLY = (ss.get("intent") == "betting" and not ss.get("peek_mode"))
+if _BETTING_ONLY:
+    if st.button("← Back", key="betting_back"):
+        ss.intent = None
+        st.rerun()
 
 
 def _render_mobile_mode_picker():
@@ -2107,7 +2125,7 @@ def _render_espn_connect_main(cfg):
 
 _ready = (mode == "Manual") or (mode == "Mock" and ss.mock_on) \
     or (mode == "ESPN" and ss.espn is not None)
-if not _ready:
+if not _ready and not _BETTING_ONLY:
     if mode == "Mock":
         st.info("Hit **Start / restart mock** in the sidebar to practice against "
                 "AI bots that draft between your turns.")
@@ -2159,23 +2177,27 @@ rnd_now = min((ov - 1) // int(teams) + 1, int(rounds))
 
 
 # --------------------------------------------------------------------------- header
-st.caption(f"🏈 {scoring_label} · {teams}-team · your slot {slot}")
+# In betting-only mode we skip the draft header + view switcher entirely; the
+# betting hub renders on its own just below.
+_view = "📈 Betting edge"
+if not _BETTING_ONLY:
+    st.caption(f"🏈 {scoring_label} · {teams}-team · your slot {slot}")
 
-hc = st.columns([1, 1, 1, 1])
-hc[0].metric("On the clock", "DONE" if draft_complete else f"#{ov}")
-hc[1].metric("Round", f"{rnd_now}/{int(rounds)}")
-hc[2].metric("Your next pick",
-             "—" if (draft_complete or not next_pick) else f"#{next_pick}",
-             "DONE" if draft_complete else
-             ("NOW" if is_my_turn else (f"in {picks_until}" if picks_until else "—")))
-hc[3].metric("Your players", f"{len(_mine)}/{int(rounds)}")
+    hc = st.columns([1, 1, 1, 1])
+    hc[0].metric("On the clock", "DONE" if draft_complete else f"#{ov}")
+    hc[1].metric("Round", f"{rnd_now}/{int(rounds)}")
+    hc[2].metric("Your next pick",
+                 "—" if (draft_complete or not next_pick) else f"#{next_pick}",
+                 "DONE" if draft_complete else
+                 ("NOW" if is_my_turn else (f"in {picks_until}" if picks_until else "—")))
+    hc[3].metric("Your players", f"{len(_mine)}/{int(rounds)}")
 
-# top-level view switch: live draft board · full rankings cheat sheet · weekly start/sit
-_VIEWS = ["🎯 Draft board", "📋 Rankings guide", "📅 Weekly lineup"]
-if LG is not None:
-    _VIEWS.append("📈 Betting edge")
-_view = st.radio("View", _VIEWS,
-                 horizontal=True, label_visibility="collapsed", key="top_view")
+    # top-level view switch: draft board · rankings cheat sheet · weekly start/sit
+    _VIEWS = ["🎯 Draft board", "📋 Rankings guide", "📅 Weekly lineup"]
+    if LG is not None:
+        _VIEWS.append("📈 Betting edge")
+    _view = st.radio("View", _VIEWS,
+                     horizontal=True, label_visibility="collapsed", key="top_view")
 
 if mode == "ESPN" and ss.espn and not ss.peek_mode:
     sc = st.columns([1, 1, 4])
@@ -2682,6 +2704,12 @@ def _render_report_card():
                "games accumulate, the calibration gaps tell us which win-prob "
                "constants to re-tune.")
 
+
+# Betting-only mode (from the welcome fork): the functions exist by now, so
+# render the hub and stop — the draft board/setup above was skipped for it.
+if _BETTING_ONLY:
+    _render_betting_edge()
+    st.stop()
 
 if _view == "📈 Betting edge":
     _render_betting_edge()
