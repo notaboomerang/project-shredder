@@ -271,6 +271,32 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
     roster_byes = {name_to_raw[n].bye for n, _ in roster.players
                    if n in name_to_raw and name_to_raw[n].bye}
 
+    # ---- DYNAMIC STREAMER GATE (DST/K) --------------------------------------
+    # DST and K are pure streamers: they should stay OFF the board until the
+    # draft signals it's time, so a noisy preseason projection can't float a
+    # defense into round 3. A position "opens" (its players rank on real value)
+    # when EITHER trigger fires:
+    #   • RUN STARTED  — enough of that position already drafted leaguewide, so
+    #     grabbing a good one now is legitimate (don't get left with scraps).
+    #   • ADP REACHED  — we're within a window of the best-available player's
+    #     actual ADP, i.e. they'd realistically come off the board around now.
+    # Until then their composite is clamped BELOW any real need so they never
+    # out-rank a startable skill player. This replaces the old static ceiling.
+    _stream_gate: dict[str, bool] = {}
+    _RUN_TRIGGER = {"DST": 2, "K": 2}     # this many gone leaguewide = run is on
+    _ADP_WINDOW = int(cfg.teams)          # within ~1 round of ADP = "time"
+    for _pos in ("DST", "K"):
+        _gone = sum(1 for n in drafted
+                    if n in name_to_raw and name_to_raw[n].position == _pos)
+        _avail_adps = [P.adp_for(name_to_raw[pv.name], scoring_key)
+                       for pv in pvs if pv.position == _pos]
+        _avail_adps = [a for a in _avail_adps if a]
+        _best_adp = min(_avail_adps) if _avail_adps else None
+        run_on = _gone >= _RUN_TRIGGER.get(_pos, 2)
+        adp_reached = (_best_adp is not None
+                       and current_overall >= _best_adp - _ADP_WINDOW)
+        _stream_gate[_pos] = bool(run_on or adp_reached)
+
     recs: list[Recommendation] = []
     for pv in pvs:
         raw = name_to_raw[pv.name]
@@ -393,6 +419,19 @@ def recommend(pool: list[P.RawPlayer], cfg: E.LeagueConfig, roster: Roster,
                             f"{pv.position} slot(s), so another {pv.position} is "
                             f"only bench/flex depth — its score is capped below "
                             f"any player who still fills a starting need."})
+        # DYNAMIC STREAMER GATE: while DST/K is still "closed" (no run started
+        # and we're well before its ADP), bury its composite so it can't jump a
+        # real pick. Once the gate opens (run on OR ADP reached) it ranks on
+        # merit like any other position.
+        if pv.position in _stream_gate and not _stream_gate[pv.position]:
+            _pre_gate = composite
+            composite = min(composite, -50.0)   # parked below every startable player
+            if composite != _pre_gate:
+                explain.append({"label": "Stream later", "value":
+                                round(composite - _pre_gate, 1),
+                                "detail": f"{pv.position} is a streamer — held "
+                                f"back until a run starts or you reach its draft "
+                                f"range, so it won't crowd out a real pick early."})
         _inj = INJ.injury_for(pv.name)
         recs.append(Recommendation(
             name=pv.name, position=pv.position, team=pv.team,

@@ -296,6 +296,8 @@ def compute_vorp(players: list[PlayerValue], cfg: LeagueConfig) -> list[PlayerVa
     if not _superflex:
         shallow["QB"] = 8   # ~QB8's points as the replacement in a 1-QB league
 
+
+
     for pos, plist in by_pos.items():
         plist.sort(key=lambda x: x.proj_points, reverse=True)
         base_rank = baselines.get(pos, len(plist))
