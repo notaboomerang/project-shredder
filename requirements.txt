@@ -11,6 +11,10 @@ reportlab>=4.0        # cheat-sheet PDF generation (make_cheatsheets.py)
 
 # --- live betting / odds stack (added for the Betting edge view) ---
 curl_cffi>=0.7        # browser-TLS impersonation; defeats ESPN's Akamai 403 block
-pandas>=2.0           # report-card calibration table + drive aggregates
-nfl_data_py>=0.3.2    # season drive pace (leading/trailing splits) for win-prob
-pyarrow>=14.0         # parquet backend nfl_data_py needs
+pandas>=2.0           # report-card calibration table + drive aggregates + pbp/schedule parquet
+pyarrow>=14.0         # parquet backend for the direct nflverse release pulls
+# NOTE: nfl_data_py intentionally NOT pinned — it pins an ancient pandas<2 that
+# fails to BUILD on Python 3.13 and would take the whole cloud install down.
+# clutch_split.py / drive_data.py / defense_vs_position.py only try to import it
+# opportunistically inside try/except and otherwise read the nflverse parquet
+# releases directly (pandas + pyarrow), so it is not required on the server.
