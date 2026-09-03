@@ -51,6 +51,11 @@ class LiveGame:
     fav_drives_left: Optional[float] = None # est. scoring drives left for the fav
     dog_drives_left: Optional[float] = None # est. scoring drives left for the dog
     possession_note: str = ""               # human-readable possession summary
+    # situational POWER PLAY: Q4 clutch history confirming the model edge
+    power_play: bool = False
+    power_play_side: str = ""               # "FAVORITE" | "UNDERDOG" | ""
+    power_play_strength: str = ""           # "STRONG" | "LEAN" | ""
+    power_play_note: str = ""
 
 
 def _get() -> dict:
@@ -205,6 +210,20 @@ def fetch_live_games() -> list[LiveGame]:
                 market_pf = WP_.spread_to_prob(favpts)
             edge_v, edge_nt = WP_.edge(model_pf, market_pf)
 
+        # ---- POWER PLAY: situational Q4 clutch history confirming the edge ----
+        pp_on, pp_side, pp_strength, pp_note = False, "", "", ""
+        if favorite and abs(edge_v) >= 0.05:
+            try:
+                import clutch_split as CS_
+                _pp = CS_.power_play_signal(home, away, favorite, edge_v)
+                if _pp.get("power_play"):
+                    pp_on = True
+                    pp_side = _pp.get("side", "")
+                    pp_strength = _pp.get("strength", "")
+                    pp_note = _pp.get("note", "")
+            except Exception:
+                pass
+
         heat, note = _upset(favorite, favpts, home, away, hs, as_,
                             state, quarter, clock)
         games.append(LiveGame(
@@ -219,7 +238,9 @@ def fetch_live_games() -> list[LiveGame]:
             possessing_team=possessing_team,
             fav_drives_left=(round(fav_drives, 2) if fav_drives is not None else None),
             dog_drives_left=(round(dog_drives, 2) if dog_drives is not None else None),
-            possession_note=poss_note))
+            possession_note=poss_note,
+            power_play=pp_on, power_play_side=pp_side,
+            power_play_strength=pp_strength, power_play_note=pp_note))
     # live games first, then by upset heat
     games.sort(key=lambda g: (g.status != "in", -g.upset_heat))
     return games

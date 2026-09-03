@@ -167,6 +167,12 @@ class GameOdds:
     best_dog_ml: Optional[float] = None
     divergence_note: str = ""                  # book-vs-consensus outlier note
 
+    # situational POWER PLAY: Q4 clutch signal confirming the model edge
+    power_play: bool = False
+    power_play_side: str = ""                  # "FAVORITE" | "UNDERDOG" | ""
+    power_play_strength: str = ""              # "STRONG" | "LEAN" | ""
+    power_play_note: str = ""
+
 
 @dataclass
 class PropOutcome:
@@ -191,6 +197,9 @@ class PlayerProp:
     best_under_book: str = ""
     best_under_price: Optional[float] = None
     divergence_note: str = ""                  # a book off the consensus line
+    matchup_note: str = ""                     # defense-vs-position read (Tier A)
+    matchup_softness: str = ""                 # "SOFT" | "TOUGH" | "NEUTRAL" | ""
+    matchup_lean: Optional[float] = None       # ± fantasy-pts nudge from the D
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +308,22 @@ def _score_game(g: GameOdds) -> None:
             g.divergence_note = (
                 f"{worst_book} is {abs(worst_gap)*100:.0f}% off consensus "
                 f"(cheapest on {side})")
+
+    # POWER PLAY: does the situational Q4 clutch read confirm the model edge?
+    # Independent signal (game-script history) reinforcing the model-vs-market
+    # gap = higher conviction. Guarded so a missing/failing clutch module never
+    # breaks the odds feed.
+    if g.edge_fav and abs(g.edge_fav) >= 0.05:
+        try:
+            import clutch_split as CS
+            pp = CS.power_play_signal(g.home, g.away, g.favorite, g.edge_fav)
+            if pp.get("power_play"):
+                g.power_play = True
+                g.power_play_side = pp.get("side", "")
+                g.power_play_strength = pp.get("strength", "")
+                g.power_play_note = pp.get("note", "")
+        except Exception:
+            pass
 
 
 def _parse_iso(ts: str):
@@ -453,6 +478,77 @@ def _score_prop(pp: PlayerProp) -> None:
             pp.divergence_note = (
                 f"{worst_book} line {softer} by {abs(worst_gap):g} "
                 f"(consensus {pp.consensus_point:g})")
+
+
+# ---------------------------------------------------------------------------
+# Player-prop matchup enrichment (Tier A: defense vs position)
+# ---------------------------------------------------------------------------
+
+# Map a prop market key to the fantasy position the OPPOSING defense is graded
+# against. Reception/receiving markets are pass-catchers — we default them to WR
+# but let a supplied position resolver override per-player (a TE or pass-catching
+# RB gets its own defense-vs-position read).
+_MARKET_POSITION = {
+    "player_pass_yds": "QB",
+    "player_pass_tds": "QB",
+    "player_pass_attempts": "QB",
+    "player_rush_yds": "RB",
+    "player_rush_attempts": "RB",
+    "player_reception_yds": "WR",
+    "player_receptions": "WR",
+    "player_anytime_td": None,          # position-agnostic; use resolver only
+}
+
+
+def enrich_props_with_matchup(props, home, away, favorite=None,
+                              team_of=None, pos_of=None, reception=0.5):
+    """Attach a Tier-A defense-vs-position matchup nudge to each prop, IN PLACE.
+
+    The prop objects carry only a player NAME and a market, so the caller
+    supplies two light resolvers built from its own player pool:
+      • team_of(name) -> team abbrev ("KC")   — to find the player's team, hence
+        the OPPONENT defense (the other side of this game).
+      • pos_of(name)  -> "QB"|"RB"|"WR"|"TE"   — overrides the market's default
+        position (so a pass-catching RB / TE gets its own read).
+
+    Both are optional; when a player's team can't be resolved we skip the nudge
+    for that prop (never guess). Degrades silently if defense_vs_position or its
+    data is unavailable. Returns the same list.
+    """
+    try:
+        import defense_vs_position as DVP
+    except Exception:
+        return props
+
+    home_u = (home or "").upper()
+    away_u = (away or "").upper()
+    team_of = team_of or (lambda _n: None)
+    pos_of = pos_of or (lambda _n: None)
+
+    for pp in props:
+        try:
+            player_team = (team_of(pp.player) or "").upper()
+            if player_team not in (home_u, away_u):
+                continue                        # can't place the player — skip
+            opponent = away_u if player_team == home_u else home_u
+
+            # position: explicit resolver first, else the market's default
+            pos = (pos_of(pp.player) or "").upper() or _MARKET_POSITION.get(pp.market)
+            if not pos:
+                continue                        # e.g. anytime-TD with no resolver
+
+            nudge = DVP.matchup_nudge(opponent, pos, reception=reception)
+            if nudge.softness in ("SOFT", "TOUGH"):
+                pp.matchup_note = nudge.note
+                pp.matchup_softness = nudge.softness
+                pp.matchup_lean = nudge.lean
+            elif nudge.source == "pbp":
+                pp.matchup_note = nudge.note
+                pp.matchup_softness = "NEUTRAL"
+                pp.matchup_lean = nudge.lean
+        except Exception:
+            continue
+    return props
 
 
 def fetch_player_props(event_id: str,

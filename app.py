@@ -2447,11 +2447,31 @@ def _render_slate():
     edges = [g for g in games if abs(g.edge_fav) >= 0.05
              and g.model_p_fav is not None]
     hot = [g for g in games if g.upset_heat >= 40 and g.status == "in"]
+    powers = [g for g in games if getattr(g, "power_play", False)]
 
-    mc = st.columns(3)
+    mc = st.columns(4)
     mc[0].metric("Games", len(games))
     mc[1].metric("Live now", live_n)
     mc[2].metric("Edges flagged", len(edges))
+    mc[3].metric("⚡ Power plays", len(powers))
+
+    # ---- Power plays (edge + situational Q4 clutch agree) ----
+    if powers:
+        st.markdown("##### ⚡ Power plays")
+        st.caption("A power play is where our model-vs-market edge AND an "
+                   "independent Q4 game-script read (how these teams perform "
+                   "late by home/away + lead/trail, 2024-25) point the SAME way. "
+                   "Two signals agreeing = higher conviction. Informational only.")
+        for g in sorted(powers, key=lambda x: (x.power_play_strength != "STRONG",
+                                               -abs(x.edge_fav))):
+            _star = "★★" if g.power_play_strength == "STRONG" else "★"
+            st.markdown(
+                f'<div class="insight i-value"><div class="it">{_star} '
+                f'{g.power_play_note}</div>'
+                f'<div class="ib">{g.away} @ {g.home} · edge '
+                f'{"+" if g.edge_fav>=0 else ""}{int(g.edge_fav*100)}% · '
+                f'{g.power_play_strength} on the {g.power_play_side.lower()}</div>'
+                f'</div>', unsafe_allow_html=True)
 
     # ---- Upset Radar (chalk in trouble) ----
     if hot:
@@ -2511,11 +2531,80 @@ def _render_slate():
                 st.markdown(
                     f'<div class="pmeta">{_ball}{_drv}</div>',
                     unsafe_allow_html=True)
+            # power-play badge (edge + Q4 clutch agree)
+            if getattr(g, "power_play", False):
+                _star = "★★" if g.power_play_strength == "STRONG" else "★"
+                st.markdown(
+                    f'<span class="vr vr-value">⚡ POWER PLAY {_star} · '
+                    f'{g.power_play_side}</span> '
+                    f'<span class="pmeta">{g.power_play_note}</span>',
+                    unsafe_allow_html=True)
     st.caption("MODEL = our live win prob for the favorite · MARKET = the same "
                "from de-vigged book odds · edge = model − market. When a game is "
                "live, the model is possession-aware: it counts each team's "
                "remaining scoring drives (who has the ball + drive-pace) instead "
                "of raw clock.")
+
+    _render_matchup_screener()
+
+
+def _render_matchup_screener():
+    """Top-N defense-vs-position matchups this week: the biggest smash spots and
+    avoid spots across the live player pool. Ranked by how far the opposing
+    defense sits from league average for that position (Tier A). Informational —
+    a start/sit and prop-lean read, never a VORP bump."""
+    try:
+        import defense_vs_position as DVP
+    except Exception:
+        return
+
+    st.markdown("##### 🎯 Top matchups this week")
+    st.caption("Each rostered/available player mapped to the defense they face "
+               "this week, ranked by how soft (smash) or tough (avoid) that "
+               "defense is for their position. Points are fantasy pts/g the "
+               "defense allows above/below league average.")
+
+    try:
+        _rec = float(getattr(E.Scoring.preset(scoring_key), "reception", 0.5))
+    except Exception:
+        _rec = 0.5
+
+    try:
+        res = DVP.matchup_screener(pool, reception=_rec, top_n=10)
+    except Exception as ex:  # noqa: BLE001
+        st.info(f"Matchup screener unavailable: {ex}")
+        return
+
+    if res["source"] != "pbp":
+        st.caption("⚠️ Running on league-average fallbacks (no play-by-play "
+                   "loaded) — reads are directional only.")
+
+    def _row(s):
+        _col = "#2f8f4e" if s.softness == "SOFT" else (
+            "#b23b3b" if s.softness == "TOUGH" else "#888")
+        _ic = "🟢" if s.softness == "SOFT" else ("🔴" if s.softness == "TOUGH" else "⚪")
+        return (f"<div class='pmeta'>{_ic} <b>{s.player}</b> "
+                f"<span style='opacity:.7'>{s.position} {s.team}</span> "
+                f"vs <b>{s.opponent}</b> · "
+                f"<span style='color:{_col};font-weight:600'>{s.lean:+.1f}</span> "
+                f"<span style='opacity:.6'>({s.pts_allowed_pg:g} allowed vs "
+                f"{s.league_pg:g} league)</span></div>")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**🟢 Smash spots**")
+        if not res["smash"]:
+            st.markdown("<div class='pmeta' style='opacity:.6'>none this week</div>",
+                        unsafe_allow_html=True)
+        for s in res["smash"]:
+            st.markdown(_row(s), unsafe_allow_html=True)
+    with c2:
+        st.markdown("**🔴 Avoid spots**")
+        if not res["avoid"]:
+            st.markdown("<div class='pmeta' style='opacity:.6'>none this week</div>",
+                        unsafe_allow_html=True)
+        for s in res["avoid"]:
+            st.markdown(_row(s), unsafe_allow_html=True)
 
 
 def _fmt_ml(ml):
@@ -2616,6 +2705,21 @@ def _render_line_shop():
             st.info("No props posted for this game yet (yardage lines usually "
                     "open closer to kickoff; anytime-TD markets post first).")
         else:
+            # Tier-A defense-vs-position nudge: resolve each prop player's team +
+            # position from the live pool, look up the OPPONENT defense's
+            # softness for that position, attach it to the prop. Best-effort.
+            try:
+                _rec = float(getattr(E.Scoring.preset(scoring_key), "reception", 0.5))
+            except Exception:
+                _rec = 0.5
+            try:
+                OF.enrich_props_with_matchup(
+                    props, g.home, g.away, favorite=g.favorite,
+                    team_of=lambda nm: getattr(name_to_raw.get(nm), "team", None),
+                    pos_of=lambda nm: getattr(name_to_raw.get(nm), "position", None),
+                    reception=_rec)
+            except Exception:
+                pass
             # group by market for readability
             by_market: dict[str, list] = {}
             for pp in props:
@@ -2632,9 +2736,22 @@ def _render_line_shop():
                     bits = " · ".join(b for b in (line, over, under) if b)
                     div = (f" · ↔ {pp.divergence_note}"
                            if pp.divergence_note else "")
+                    mtag = ""
+                    if pp.matchup_softness in ("SOFT", "TOUGH"):
+                        _col = "#2f8f4e" if pp.matchup_softness == "SOFT" else "#b23b3b"
+                        _ln = (f" {pp.matchup_lean:+.1f}"
+                               if pp.matchup_lean is not None else "")
+                        mtag = (f" · <span style='color:{_col};font-weight:600'>"
+                                f"{'🟢' if pp.matchup_softness=='SOFT' else '🔴'} "
+                                f"{pp.matchup_softness} matchup{_ln}</span>")
                     st.markdown(
-                        f"<div class='pmeta'><b>{pp.player}</b> — {bits}{div}</div>",
+                        f"<div class='pmeta'><b>{pp.player}</b> — {bits}{div}{mtag}</div>",
                         unsafe_allow_html=True)
+                    if pp.matchup_note and pp.matchup_softness in ("SOFT", "TOUGH"):
+                        st.markdown(
+                            f"<div class='pmeta' style='opacity:.75;margin-left:8px'>"
+                            f"↳ {pp.matchup_note}</div>",
+                            unsafe_allow_html=True)
 
 
 def _render_report_card():
