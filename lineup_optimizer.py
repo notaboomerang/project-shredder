@@ -47,10 +47,35 @@ def _week_opponent(team: str, week: int) -> Optional[str]:
 
 
 def _matchup_adj(team: str, position: str, week: int) -> tuple[float, str]:
-    """Per-week adjustment + reason fragment from THIS week's opponent pass-D."""
+    """Per-week adjustment + reason from THIS week's opponent.
+
+    Prefers the REAL defense-vs-position read (defense_vs_position, from live
+    play-by-play — fantasy pts/g that defense allows to this position vs league).
+    Falls back to the seeded pass-TD-allowed table when that module/data is
+    unavailable, so the optimizer always produces a number.
+    """
     opp = _week_opponent(team, week)
     if opp is None:
         return 0.0, "on bye" if opp is None and week in _byes(team) else "matchup n/a"
+
+    # 1) real defense-vs-position (pbp) — the same layer the screener/eruption use
+    try:
+        import defense_vs_position as DVP
+        if position in DVP._POSITIONS:
+            n = DVP.matchup_nudge(opp, position)
+            if n.source in ("pbp", "cache"):
+                adj = n.lean            # already in fantasy-pts/g terms
+                if n.softness == "SOFT":
+                    return adj, (f"juicy matchup vs {opp} — soft {position} D "
+                                 f"(+{n.surplus_pg:g} pts/g vs league)")
+                if n.softness == "TOUGH":
+                    return adj, (f"tough matchup vs {opp} — stingy {position} D "
+                                 f"({n.surplus_pg:g} pts/g vs league)")
+                return adj, f"neutral matchup vs {opp} ({n.surplus_pg:+g} pts/g)"
+    except Exception:
+        pass
+
+    # 2) fallback: seeded pass-TD-allowed table
     pd = M.load_pass_defense().get(opp, 26.5)
     soft = pd - 26.5
     if position in ("QB", "WR", "TE"):
@@ -100,6 +125,28 @@ def optimize_week(roster_players: list[tuple[str, str]], pool: list[P.RawPlayer]
             pts += adelta * 0.1
             if abadges:
                 reasons.append(abadges[0].lower())
+            # ceiling (eruption) — a small upside nudge + context, half weight
+            try:
+                import eruption_watch as EW
+                _sp = EW.eruption_watch(
+                    [{"name": name, "team": raw.team, "position": pos}],
+                    week=week)
+                spots = _sp.get("spots") if isinstance(_sp, dict) else None
+                if spots:
+                    boost = spots[0].ceiling_boost
+                    pts += 0.15 * boost
+                    reasons.append(f"ceiling +{boost:g}")
+            except Exception:
+                pass
+            # division-game factual context (no scoring effect)
+            try:
+                from divisions import division_tag
+                opp_now = _week_opponent(raw.team, week)
+                dt = division_tag(raw.team, opp_now) if opp_now else ""
+                if dt:
+                    reasons.append(dt)
+            except Exception:
+                pass
 
         scored.append(StartSit(
             name=name, position=pos, team=raw.team, slot="BENCH",
