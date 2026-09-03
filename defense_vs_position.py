@@ -678,12 +678,21 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
             if nudge.source in ("pbp", "cache"):
                 src = "pbp"
             seen.add(key)
+            # factual division-game context (no scoring effect)
+            div_tag = ""
+            try:
+                from divisions import division_tag as _dtag
+                _dt = _dtag(team, opp)
+                if _dt:
+                    div_tag = f" · {_dt}"
+            except Exception:
+                pass
             spots.append(MatchupSpot(
                 player=name, team=team, position=pos, opponent=opp,
                 pts_allowed_pg=nudge.pts_allowed_pg, league_pg=nudge.league_pg,
                 surplus_pg=nudge.surplus_pg, softness=nudge.softness,
                 lean=nudge.lean,
-                note=f"{name}{inj_tag} ({pos}, {team}) vs {opp}: {nudge.note}"))
+                note=f"{name}{inj_tag} ({pos}, {team}) vs {opp}: {nudge.note}{div_tag}"))
         except Exception:
             continue
 

@@ -274,10 +274,18 @@ def _pace_signal(team):
 # ---------------------------------------------------------------------------
 
 def _flavor_tags(player, team, opponent, injury_of):
-    """Non-predictive narrative tags: revenge angle, QB status. Never affect the
-    score — surfaced so the user has context, explicitly labeled as flavor."""
+    """Non-predictive narrative tags: revenge angle, QB status, division game.
+    Never affect the score — surfaced so the user has context, explicitly
+    labeled as flavor."""
     tags = []
-    # (revenge would need a former-team map; left as a hook. QB status via inj.)
+    # division game — deterministic, factual context (no scoring effect)
+    try:
+        from divisions import division_tag as _dtag
+        _dt = _dtag(team, opponent)
+        if _dt:
+            tags.append(_dt)
+    except Exception:
+        pass
     try:
         inj = injury_of(player) if injury_of else None
         chip = getattr(inj, "chip", "") if inj else ""
