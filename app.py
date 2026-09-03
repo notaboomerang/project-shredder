@@ -2546,6 +2546,120 @@ def _render_slate():
                "of raw clock.")
 
     _render_matchup_screener()
+    _render_eruption_watch()
+
+
+def _render_eruption_watch():
+    """🌋 Eruption Watch — players most likely to blow past projection this week,
+    scored by stacking Vegas game environment, weather/roof, matchup softness,
+    and pace. Weights are user-tunable sliders. Informational ceiling read."""
+    try:
+        import eruption_watch as EW
+    except Exception:
+        return
+
+    st.markdown("##### 🌋 Eruption Watch")
+    st.caption("Players likely to smash their projection. Each row stacks "
+               "independent ceiling signals — Vegas game environment, "
+               "weather/roof, matchup softness, and pace — into a projected "
+               "points boost. Revenge/QB narratives are flavor only (no proven "
+               "edge). OUT/IR players filtered.")
+
+    with st.expander("⚙️ Tune signal weights"):
+        st.caption("Max points each signal can add. Adjust to taste — changes "
+                   "apply immediately.")
+        c = st.columns(4)
+        EW.W_VEGAS_MAX = c[0].slider("Vegas", 0.0, 8.0, EW.W_VEGAS_MAX, 0.5,
+                                     key="_ew_vegas")
+        EW.W_MATCHUP_MAX = c[1].slider("Matchup", 0.0, 8.0, EW.W_MATCHUP_MAX,
+                                       0.5, key="_ew_matchup")
+        EW.W_WEATHER_MAX = c[2].slider("Weather", 0.0, 8.0, EW.W_WEATHER_MAX,
+                                       0.5, key="_ew_weather")
+        EW.W_PACE_MAX = c[3].slider("Pace", 0.0, 8.0, EW.W_PACE_MAX, 0.5,
+                                    key="_ew_pace")
+        EW.ERUPTION_MIN_BOOST = st.slider(
+            "Min boost to list", 0.0, 15.0, EW.ERUPTION_MIN_BOOST, 0.5,
+            key="_ew_min")
+
+    try:
+        _rec = float(getattr(E.Scoring.preset(scoring_key), "reception", 0.5))
+    except Exception:
+        _rec = 0.5
+
+    # Auto-pull odds ONCE per session so the Vegas signal is live the moment the
+    # app opens — no need to visit Line-shop first. Uses the SAME session cache
+    # key the Line-shop tab populates, so this is at most one fetch per session
+    # (quota-safe: The Odds API free tier is ~500 credits/mo, and reruns reuse
+    # the cached result). Guarded — a missing key / API failure just leaves the
+    # Vegas signal dark and the other three signals still run.
+    if (OF is not None and "_odds_games" not in st.session_state
+            and OF.configured()):
+        with st.spinner("Pulling game odds for the Vegas signal…"):
+            try:
+                st.session_state["_odds_games"] = OF.fetch_game_odds()
+            except Exception:
+                st.session_state["_odds_games"] = []
+
+    # Vegas env resolver from the live odds games (if pulled): implied team
+    # total = total/2 shifted by half the spread toward the favorite.
+    _games = st.session_state.get("_odds_games") or []
+    _env_by_team: dict = {}
+    for _g in _games:
+        try:
+            tot = getattr(_g, "total", None)
+            spr = getattr(_g, "spread", None)
+            fav = (getattr(_g, "favorite", "") or "").upper()
+            hm = (getattr(_g, "home", "") or "").upper()
+            aw = (getattr(_g, "away", "") or "").upper()
+            if tot is None:
+                continue
+            half = tot / 2.0
+            edge = (spr / 2.0) if spr is not None else 0.0
+            fav_tot = half + edge
+            dog_tot = half - edge
+            for _t in (hm, aw):
+                _env_by_team[_t] = ((fav_tot if _t == fav else dog_tot),
+                                    spr if spr is not None else None)
+        except Exception:
+            continue
+
+    def _env_of(team, _wk):
+        return _env_by_team.get((team or "").upper())
+
+    try:
+        res = EW.eruption_watch(pool, reception=_rec, top_n=12,
+                                game_env_of=_env_of if _env_by_team else None)
+    except Exception as ex:  # noqa: BLE001
+        st.info(f"Eruption Watch unavailable: {ex}")
+        return
+
+    if not _env_by_team:
+        if OF is not None and not OF.configured():
+            st.caption("💡 No Odds API key set — the Vegas game-environment "
+                       "signal is off. Running on weather + matchup + pace only. "
+                       "Add a key in secrets to enable it.")
+        else:
+            st.caption("💡 Vegas signal is warming up (odds not loaded yet) — "
+                       "running on weather + matchup + pace. Refresh if it "
+                       "doesn't populate.")
+
+    if not res["spots"]:
+        st.markdown("<div class='pmeta' style='opacity:.6'>No eruption spots "
+                    "clear the threshold this week — lower the min boost to see "
+                    "more.</div>", unsafe_allow_html=True)
+        return
+
+    for s in res["spots"]:
+        chips = " ".join(f"<span style='opacity:.7'>{k} {b:+.1f}</span>"
+                         for k, (b, _w) in s.signals.items())
+        flav = (" · " + " · ".join(s.flavor)) if s.flavor else ""
+        st.markdown(
+            f"<div class='pmeta'>🌋 <b>{s.player}</b> "
+            f"<span style='opacity:.7'>{s.position} {s.team}</span> vs "
+            f"<b>{s.opponent}</b> · "
+            f"<span style='color:#e08a2b;font-weight:700'>+{s.ceiling_boost:g} "
+            f"ceiling</span> · {chips}{flav}</div>",
+            unsafe_allow_html=True)
 
 
 def _render_matchup_screener():

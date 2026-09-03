@@ -606,7 +606,8 @@ class MatchupSpot:
 
 
 def matchup_screener(players, week=None, season=None, reception: float = 0.5,
-                     top_n: int = 10, opponent_of=None):
+                     top_n: int = 10, opponent_of=None, injury_of=None,
+                     drop_out: bool = True):
     """Rank a slate of players by how good/bad their DEFENSE-VS-POSITION matchup
     is this week — the fantasy analog of "top-N biggest gaps."
 
@@ -616,6 +617,10 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
     `opponent_of(team, week) -> opp_abbr` — resolves the defense a team faces this
       week. Defaults to matchups.load_schedule() when importable; a team on a bye
       (or unresolved) is skipped.
+    `injury_of(name) -> injury-or-None` — resolves live injury status. Defaults to
+      injuries.injury_for. When `drop_out` is True (default) a player flagged
+      OUT / IR / PUP / SUS / DNR is EXCLUDED (a smash matchup is worthless if he
+      can't play); Questionable/Doubtful are KEPT but tagged in `.note`.
     `week` — schedule week; defaults to the current NFL week (best-effort).
 
     Returns {"week", "smash": [MatchupSpot...], "avoid": [MatchupSpot...],
@@ -626,6 +631,11 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
 
     if opponent_of is None:
         opponent_of = _default_opponent_of()
+    if injury_of is None:
+        injury_of = _default_injury_of()
+
+    # chips that mean "not playing this week" — filtered out when drop_out
+    _OUT_CHIPS = {"O", "IR", "PUP", "SUS", "DNR"}
 
     def _attr(p, name):
         v = getattr(p, name, None)
@@ -646,6 +656,21 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
             key = (name, pos)
             if key in seen:            # one row per player-position
                 continue
+
+            # injury gate: drop players who can't play; tag those who might
+            inj_tag = ""
+            try:
+                inj = injury_of(name)
+            except Exception:
+                inj = None
+            if inj is not None:
+                chip = getattr(inj, "chip", "") or ""
+                if drop_out and chip in _OUT_CHIPS:
+                    seen.add(key)      # resolved as unavailable — don't reconsider
+                    continue
+                if chip:
+                    inj_tag = f" [{chip}]"
+
             opp = (opponent_of(team, wk) or "").upper()
             if not opp:                # bye / unresolved -> skip
                 continue
@@ -658,7 +683,7 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
                 pts_allowed_pg=nudge.pts_allowed_pg, league_pg=nudge.league_pg,
                 surplus_pg=nudge.surplus_pg, softness=nudge.softness,
                 lean=nudge.lean,
-                note=f"{name} ({pos}, {team}) vs {opp}: {nudge.note}"))
+                note=f"{name}{inj_tag} ({pos}, {team}) vs {opp}: {nudge.note}"))
         except Exception:
             continue
 
@@ -697,6 +722,22 @@ def _default_opponent_of():
         wk_map = sched.get((team or "").upper()) or sched.get(team) or {}
         opp = wk_map.get(week) or wk_map.get(int(week)) if wk_map else None
         return opp or ""
+    return _resolve
+
+
+def _default_injury_of():
+    """injury_of(name) backed by injuries.injury_for(); returns a resolver that
+    yields None (treat as healthy) when the injuries module isn't importable."""
+    try:
+        from injuries import injury_for
+    except Exception:
+        return lambda _name: None
+
+    def _resolve(name):
+        try:
+            return injury_for(name)
+        except Exception:
+            return None
     return _resolve
 
 
