@@ -1843,6 +1843,56 @@ opps = ss.opponents
 # This is what makes "who's left for me" account for how opponents really draft.
 loyalty_by_slot = _apply_dna_to_opponents(opps)
 
+# --- LIVE DOM SYNC: ingest picks the _dom_live_poller.py process scrapes from the
+# ESPN draft room into data/live_picks.json. This is the durable live path (the
+# REST _sync_espn returns placeholder playerIds mid-draft). Runs every render and
+# is a no-op when the poller isn't running / the feed file is absent, so it never
+# interferes with Mock, Manual, or the REST connect flow. Was previously never
+# called — the poller wrote the feed but the app had no reader wired in. ---
+try:
+    import live_dom_sync as _LDS
+except Exception:  # noqa: BLE001
+    _LDS = None
+if _LDS is not None and _LDS.feed_exists():
+    _my_team = ""
+    try:
+        for _e in (_saved_leagues_load() or []):
+            if _e.get("my_team_name"):
+                _my_team = _e["my_team_name"]; break
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _new = _LDS.read_new_picks(pool, ss.drafted, _my_team)
+    except Exception as _ex:  # noqa: BLE001
+        _new = []
+        st.sidebar.caption(f"live-sync read error: {_ex}")
+    _ingested = 0
+    for _p in _new:
+        if _p["name"] in ss.drafted:
+            continue
+        _record_pick(cfg, _p["name"], _p.get("position") or "?",
+                     mine=bool(_p.get("mine")), opps=opps, advance=False)
+        _ingested += 1
+    # status heartbeat from the poller (state + total picks seen)
+    try:
+        import json as _json, os as _osx
+        _st = _json.load(open(_osx.path.join(_osx.path.dirname(__file__),
+                              "data", "poller_status.json")))
+        st.sidebar.success(
+            f"🟢 Live sync: {_st.get('state','?')} · feed {_st.get('picks',0)} picks"
+            + (f" · +{_ingested} new" if _ingested else ""))
+    except Exception:  # noqa: BLE001
+        st.sidebar.caption(f"🟢 Live sync active"
+                           + (f" · +{_ingested} new picks" if _ingested else ""))
+    if _ingested:
+        st.rerun()
+    # keep pulling while the draft is live (auto-refresh every 3s if available)
+    try:
+        from streamlit_autorefresh import st_autorefresh as _autoref
+        _autoref(interval=3000, key="_dom_live_autoref")
+    except Exception:  # noqa: BLE001
+        pass
+
 st.sidebar.markdown("---")
 
 # ---- mode-specific setup ----
@@ -1930,30 +1980,34 @@ elif mode == "ESPN":
             st.sidebar.caption(
                 "Paste your two ESPN cookies below. They stay private to your "
                 "session — never saved on the server.")
-        with st.sidebar.expander("Paste cookies (espn_s2 + SWID)",
-                                 expanded=(not have_ck)):
-            if IS_CLOUD:
+        # DESKTOP: the persistent-profile poller (run_draft.bat) handles ESPN
+        # login in its own Chromium, so the cookie-paste path is NOT needed here
+        # and only tempts the fragile s2/SWID flow. Show it ONLY on the cloud.
+        if IS_CLOUD:
+            with st.sidebar.expander("Paste cookies (espn_s2 + SWID)",
+                                     expanded=(not have_ck)):
                 st.caption("To find them: on a computer logged into "
                            "fantasy.espn.com, DevTools (F12) → Application → "
                            "Cookies → copy `espn_s2` and `SWID`.")
-            s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2)
-            swid = st.text_input("SWID", type="password", value=ss.espn_swid)
-            if st.button("Use these cookies"):
-                ss.espn_s2, ss.espn_swid = s2, swid
-                # persist to disk ONLY on the desktop (single user). On the cloud
-                # keep them session-only so users never share a cookie file.
-                if not IS_CLOUD and SEC:
-                    SEC.save_file(s2, swid)
-                st.rerun()
-            if have_ck and st.button("Forget cookies"):
-                ss.espn_s2 = ss.espn_swid = ""
-                ss["_my_leagues"] = []
-                if not IS_CLOUD and SEC:
-                    try:
-                        SEC.forget()
-                    except Exception:  # noqa: BLE001
-                        pass
-                st.rerun()
+                s2 = st.text_input("espn_s2", type="password", value=ss.espn_s2)
+                swid = st.text_input("SWID", type="password", value=ss.espn_swid)
+                if st.button("Use these cookies"):
+                    ss.espn_s2, ss.espn_swid = s2, swid
+                    st.rerun()
+                if have_ck and st.button("Forget cookies"):
+                    ss.espn_s2 = ss.espn_swid = ""
+                    ss["_my_leagues"] = []
+                    st.rerun()
+        else:
+            # Desktop: point the user at the live-sync path, no cookie fiddling.
+            import os as _osck
+            _feed = _osck.path.join(_osck.path.dirname(__file__), "data", "live_picks.json")
+            if _osck.path.exists(_feed):
+                st.sidebar.success("🟢 Live sync via poller — no cookies needed.")
+            else:
+                st.sidebar.info("Start **run_draft.bat**, log into ESPN in the "
+                                "Chromium it opens, and open your draft room "
+                                "there. Picks sync automatically — no cookies.")
 
         # ONE-TAP bookmarklet demoted to Advanced (QR peek covers the common
         # phone case now, so this is only for 'connect on my phone, no computer').

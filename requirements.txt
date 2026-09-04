@@ -6,6 +6,7 @@
 # cookies" path when they're absent.
 
 streamlit>=1.40
+streamlit-autorefresh>=1.0   # live-sync auto-tick (board pulls new picks every 3s)
 requests>=2.31
 reportlab>=4.0        # cheat-sheet PDF generation (make_cheatsheets.py)
 

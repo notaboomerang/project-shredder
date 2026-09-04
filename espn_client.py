@@ -83,8 +83,8 @@ class EspnClient:
         self.sess = requests.Session()
         self.sess.headers.update({"User-Agent": _UA, "Accept": "application/json"})
         # SWID must be wrapped in {braces}; tolerate the user pasting it either way.
-        if swid and not swid.startswith("{"):
-            swid = "{" + swid.strip("{}") + "}"
+        if swid:  # normalize to exactly one {...} (tolerate bare/half/double-braced)
+            swid = "{" + swid.strip("{}").strip() + "}"
         if espn_s2 and swid:
             self.sess.cookies.update({"espn_s2": espn_s2, "SWID": swid})
         self._player_cache: dict[int, dict] = {}
@@ -500,8 +500,11 @@ def discover_leagues(espn_s2: str, swid: str, timeout: float = 10.0) -> dict:
         return {"ok": False, "message": "SWID cookie is required to auto-discover "
                 "leagues.", "leagues": []}
     guid = swid.strip()
-    if not guid.startswith("{"):
-        guid = "{" + guid.strip("{}") + "}"
+    # Normalize to EXACTLY one leading { and one trailing } no matter what came
+    # in — bare, half-braced ("{GUID" with no close), or double-braced. A
+    # half-braced SWID (from a truncated URL-param ingest) was reaching ESPN as
+    # "/fans/%7BGUID" with no %7D and 404ing. Strip ALL braces, then re-wrap.
+    guid = "{" + guid.strip("{}").strip() + "}"
 
     sess = requests.Session()
     sess.headers.update({"User-Agent": _UA, "Accept": "application/json"})

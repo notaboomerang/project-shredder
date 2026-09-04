@@ -60,8 +60,8 @@ def _load_cookies() -> tuple[str, str]:
             swid = j.get("swid", "") or j.get("SWID", "")
         except Exception:
             pass
-    if swid and not swid.startswith("{"):
-        swid = "{" + swid.strip("{}") + "}"
+    if swid:
+        swid = "{" + swid.strip("{}").strip() + "}"
     return s2, swid
 
 
