@@ -22,6 +22,7 @@ Draft is read-only. Be gentle: poll every ~4-5s, well within tolerance.
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -38,6 +39,23 @@ _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) FantasyDraftAssistant/1.0"
 
 # ESPN encodes position as a numeric slot id on the player object.
 ESPN_POS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
+
+# ESPN proTeamId -> team abbreviation (0 = free agent / none).
+ESPN_PRO_TEAM = {
+    0: "FA", 1: "ATL", 2: "BUF", 3: "CHI", 4: "CIN", 5: "CLE", 6: "DAL",
+    7: "DEN", 8: "DET", 9: "GB", 10: "TEN", 11: "IND", 12: "KC", 13: "LV",
+    14: "LAR", 15: "MIA", 16: "MIN", 17: "NE", 18: "NO", 19: "NYG",
+    20: "NYJ", 21: "PHI", 22: "ARI", 23: "PIT", 24: "LAC", 25: "SF",
+    26: "SEA", 27: "TB", 28: "WSH", 29: "CAR", 30: "JAX", 33: "BAL",
+    34: "HOU",
+}
+
+# ESPN lineupSlotId -> label. A bench/IR slot means the player is NOT starting.
+ESPN_SLOT = {
+    0: "QB", 2: "RB", 4: "WR", 6: "TE", 16: "DST", 17: "K",
+    20: "BENCH", 21: "IR", 23: "FLEX", 7: "OP",
+}
+_STARTING_SLOTS = {0, 2, 4, 6, 16, 17, 23, 7}  # anything not BENCH/IR
 
 
 def _norm_name(name: str) -> str:
@@ -348,6 +366,81 @@ class EspnClient:
                     by_team.setdefault(tname, []).append(nm)
         return {"names": names, "by_team": by_team}
 
+    def team_rosters(self, mine_only: bool = False) -> dict:
+        """Full per-team rosters WITH position, pro-team, lineup slot, and injury.
+
+        Returns {'teams': [ {team_id, team_name, owner, is_mine,
+                             players: [ {name, position, pro_team, slot,
+                                         starting: bool, injury} ... ] } ... ],
+                 'my_team_ids': [int...] }.
+
+        My teams are flagged by matching the SWID owner GUID (same logic as
+        league_profile). Set mine_only=True to return just my team(s). Used by
+        the Team Management page to load an already-drafted roster from the
+        league without a live draft in progress. Never raises: a malformed
+        entry is skipped and an unknown slot/pro-team falls back to a string id.
+        """
+        data = self._get_with_fallback(["mRoster", "mTeam", "mSettings"])
+        self._ensure_players(data)
+
+        # my owner GUID = the SWID cookie (uppercased, braces normalized)
+        my_guid = ""
+        swid = self.sess.cookies.get("SWID") or ""
+        if swid:
+            my_guid = "{" + swid.strip("{}").upper() + "}"
+
+        members = {}
+        for m in data.get("members", []) or []:
+            gid = (m.get("id") or "").upper()
+            if not gid.startswith("{"):
+                gid = "{" + gid.strip("{}") + "}"
+            members[gid] = (f'{m.get("firstName","")} {m.get("lastName","")}'.strip()
+                            or m.get("displayName", ""))
+
+        teams_out = []
+        my_ids = []
+        for t in data.get("teams", []) or []:
+            tname = (t.get("name")
+                     or f'{t.get("location","")} {t.get("nickname","")}'.strip()
+                     or f'Team {t.get("id")}')
+            owners = [o.upper() if isinstance(o, str) else o
+                      for o in (t.get("owners") or [])]
+            owners = ["{" + o.strip("{}") + "}" if isinstance(o, str)
+                      and not o.startswith("{") else o for o in owners]
+            is_mine = bool(my_guid) and my_guid in owners
+            if is_mine:
+                my_ids.append(t.get("id"))
+            if mine_only and not is_mine:
+                continue
+
+            players = []
+            for ent in (t.get("roster") or {}).get("entries") or []:
+                pp = (ent.get("playerPoolEntry") or {}).get("player") or {}
+                nm = pp.get("fullName")
+                if not nm:
+                    continue
+                pos = ESPN_POS.get(pp.get("defaultPositionId"), "")
+                pro = ESPN_PRO_TEAM.get(pp.get("proTeamId"),
+                                        str(pp.get("proTeamId", "")))
+                slot_id = ent.get("lineupSlotId")
+                slot = ESPN_SLOT.get(slot_id, str(slot_id) if slot_id is not None else "")
+                starting = slot_id in _STARTING_SLOTS
+                injury = pp.get("injuryStatus") or ""
+                players.append({
+                    "name": nm, "position": pos, "pro_team": pro,
+                    "slot": slot, "starting": starting, "injury": injury,
+                })
+
+            teams_out.append({
+                "team_id": t.get("id"),
+                "team_name": tname,
+                "owner": (members.get(owners[0]) if owners else ""),
+                "is_mine": is_mine,
+                "players": players,
+            })
+
+        return {"teams": teams_out, "my_team_ids": my_ids}
+
     def player_week_points(self, week: int) -> dict:
         """Return {normalized_name: fantasy_points} for a given scoring week,
         using this league's scoring settings. Pulls kona_player_info with the
@@ -358,9 +451,17 @@ class EspnClient:
                f"/segments/0/leagues/{self.league_id}")
         headers = {
             "x-fantasy-filter": json.dumps({
-                "players": {"limit": 700,
-                            "filterStatsForCurrentSeasonScoringPeriodId":
-                                {"value": [int(week)]}}}),
+                "players": {
+                    "limit": 700,
+                    # ESPN rejects a limit with no sort (FILTER_LIMIT_MISSING_SORT,
+                    # HTTP 400). Sort by the week's applied total, descending.
+                    "sortAppliedStatTotalForScoringPeriodId": {
+                        "sortAsc": False,
+                        "sortPriority": 1,
+                        "value": int(week),
+                    },
+                    "filterStatsForCurrentSeasonScoringPeriodId":
+                        {"value": [int(week)]}}}),
         }
         out: dict[str, float] = {}
         try:

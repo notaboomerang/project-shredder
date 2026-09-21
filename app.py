@@ -46,6 +46,10 @@ try:
 except Exception:  # noqa: BLE001
     EC = None
 try:
+    import team_manager as TM
+except Exception:  # noqa: BLE001
+    TM = None
+try:
     import secrets_store as SEC
 except Exception:  # noqa: BLE001
     SEC = None
@@ -588,36 +592,40 @@ def _intent_gate():
         return
 
     _render_masthead()
-    st.markdown("### Welcome — how are you using Shredder right now?")
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    st.markdown("### Welcome — what are you here to do?")
+
+    # Option B landing hub: Team Management is the PRIMARY (the season is long,
+    # the draft is one day), with Draft Room + Betting Edge as secondary cards.
+    pcol, scol = st.columns([1.4, 1])
+    with pcol:
         st.markdown(
-            "#### 🎯 I'm drafting on this device\n"
-            "Connect your ESPN league (or run a mock) and get the best pick, live, "
-            "as you draft right here.")
-        if st.button("Draft here", type="primary", use_container_width=True,
+            "#### 🧠 Team Management\n"
+            "Your **already-drafted rosters**, pulled live from ESPN. Who to "
+            "start, which benched player is about to erupt, and the waiver adds "
+            "predicted to smash this week 🌋 — every erupt call logged to a "
+            "ledger so you can check the hit-rate.")
+        if st.button("Open my teams →", type="primary",
+                     use_container_width=True, key="intent_team"):
+            ss.intent = "team"
+            st.rerun()
+    with scol:
+        st.markdown(
+            "#### 🎯 Draft Room\n"
+            "Live-draft copilot — best-pick board, VORP, opponent DNA, snake "
+            "queue.")
+        if st.button("Enter draft", use_container_width=True,
                      key="intent_draft"):
             ss.intent = "draft"
             st.rerun()
-    with c2:
         st.markdown(
-            "#### 👀 I'm just watching (peek)\n"
-            "Drafting somewhere else and want Shredder's picks on this screen too? "
-            "Open the peek link from the computer running Shredder — no login here.")
-        if st.button("I'm just watching", use_container_width=True,
-                     key="intent_watch"):
-            ss.intent = "watch"
-            st.rerun()
-    with c3:
-        st.markdown(
-            "#### 📈 Betting edge\n"
-            "Live NFL win-prob vs the market, multi-book line shopping, and player "
-            "props. No draft or login needed — jump straight in.")
-        if st.button("Betting edge", use_container_width=True,
+            "#### 📈 Betting Edge\n"
+            "Live win-prob vs the market, line shopping, and player props. No "
+            "login needed.")
+        if st.button("Open odds", use_container_width=True,
                      key="intent_betting"):
             ss.intent = "betting"
             st.rerun()
-    st.caption("You can switch anytime from the sidebar.")
+    st.caption("You can switch anytime — every screen has a ◀ hub button.")
     st.stop()
 
 
@@ -722,6 +730,20 @@ if ss.get("intent") == "watch" and not ss.get("peek_mode"):
     _render_watch_help()
 
 _render_masthead()
+
+# Persistent hub navigation: once you've entered a section (Draft / Team / Odds)
+# a "◀ hub" button returns to the landing fork. Replaces the old horizontal
+# radio as the primary way to move between the three top-level areas. Only shown
+# when a section is active and not in the read-only peek mirror.
+if ss.get("intent") and not ss.get("peek_mode"):
+    _hb = st.columns([1, 5])
+    _labels = {"team": "🧠 Team Management", "draft": "🎯 Draft Room",
+               "betting": "📈 Betting Edge"}
+    if _hb[0].button("◀ hub", key="hub_back",
+                     help="Back to Draft / Team / Odds"):
+        ss.intent = None
+        st.rerun()
+    _hb[1].caption(_labels.get(ss.get("intent"), ""))
 
 # Betting-edge shortcut (chosen from the welcome fork): skip ALL the ESPN/mock/
 # draft setup below and render only the betting hub. The render functions are
@@ -1774,6 +1796,23 @@ def _render_recent_picks(limit=10):
 st.sidebar.markdown(
     '<div class="sb-brand">Project <span class="lo">Shredder</span></div>',
     unsafe_allow_html=True)
+
+# Top-level hub selector — the universal 3-way nav (Draft / Team / Odds),
+# available on desktop AND cloud. Writes ss.intent, which the terminal routes
+# below read. Keeps the landing fork and the ◀ hub button in sync.
+_HUBS = {"🎯 Draft Room": "draft", "🧠 Team Management": "team",
+         "📈 Betting Edge": "betting"}
+_hub_names = list(_HUBS.keys())
+_cur_intent = ss.get("intent") or "draft"
+_cur_hub = next((k for k, v in _HUBS.items() if v == _cur_intent), _hub_names[0])
+_hub_choice = st.sidebar.radio("Section", _hub_names,
+                               index=_hub_names.index(_cur_hub),
+                               key="hub_radio",
+                               help="Draft = live-draft copilot · Team = manage "
+                                    "your drafted rosters · Odds = betting edge.")
+if _HUBS[_hub_choice] != _cur_intent:
+    ss.intent = _HUBS[_hub_choice]
+    st.rerun()
 
 _MODES = ["Mock", "Manual", "ESPN"]
 mode = st.sidebar.radio("How are you drafting?", _MODES,
@@ -3000,6 +3039,17 @@ def _render_report_card():
 # render the hub and stop — the draft board/setup above was skipped for it.
 if _BETTING_ONLY:
     _render_betting_edge()
+    st.stop()
+
+# Team Management hub (from the landing fork): load already-drafted rosters from
+# ESPN and render start/sit + erupt-on-bench + waiver eruptions + the ledger.
+if ss.get("intent") == "team" and not ss.get("peek_mode"):
+    if TM is None:
+        st.error("Team Management module unavailable.")
+        st.stop()
+    _tm_week = ss.get("_espn_week") or 1
+    TM.render(ss, pool, cfg, scoring_key, espn=ss.get("espn"),
+              default_week=int(_tm_week))
     st.stop()
 
 if _view == "📈 Betting edge":

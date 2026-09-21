@@ -43,6 +43,7 @@ W_VEGAS_MAX = 5.0        # game environment: implied total + script
 W_WEATHER_MAX = 3.0      # dome / clean weather upside (or negative for bad wx)
 W_MATCHUP_MAX = 4.0      # soft defense-vs-position
 W_PACE_MAX = 2.5         # fast-pace extra plays
+W_CAST_MAX = 4.0         # supporting-cast QB quality (can be NEGATIVE)
 
 # Vegas: an implied team total at/above this = full Vegas boost; league-ish
 # baseline gets ~0. Script bonus when the game projects close (dog/small spread).
@@ -120,6 +121,7 @@ class EruptionSpot:
     ceiling_boost: float                 # total projected pts above baseline
     signals: dict = field(default_factory=dict)   # signal -> (boost, why)
     flavor: list = field(default_factory=list)     # revenge/QB tags, non-scored
+    cast_quality: str = ""                         # ⚠️ QB/cast cap note, or ""
     note: str = ""
 
 
@@ -246,6 +248,86 @@ def _matchup_signal(pos, opponent, season, reception):
     # ~+6 pts/g surplus ≈ full weight
     boost = _clamp(n.surplus_pg / 6.0, 0.0, 1.0) * W_MATCHUP_MAX
     return round(boost, 2), f"soft vs {opponent} (+{n.surplus_pg:g} pts/g)"
+
+
+# ---------------------------------------------------------------------------
+# Supporting-cast / QB quality — a stud pass-catcher's ceiling is capped when
+# the guy throwing them the ball is a backup, rookie, or bottom-tier starter
+# (e.g. "Bijan smashes on paper but the team is on its 4th-string QB"). This is
+# the one signal that can go NEGATIVE. Data-backed: a seeded per-team QB tier,
+# overridable by data/team_qb_context.json so it stays current without a code
+# change. RBs are far less QB-dependent than WR/TE, so they take a fraction.
+# ---------------------------------------------------------------------------
+
+# qb_tier: 1 = elite, 2 = solid starter, 3 = shaky/rookie starter, 4 = backup/
+#          4th-string / committee — the deeper you go, the more it caps the
+#          pass game. note = short human reason surfaced on the card.
+_QB_CTX_SEED = {
+    "ATL": {"qb_tier": 2}, "BAL": {"qb_tier": 1}, "BUF": {"qb_tier": 1},
+    "CIN": {"qb_tier": 1}, "DAL": {"qb_tier": 2}, "DET": {"qb_tier": 2},
+    "GB": {"qb_tier": 2}, "HOU": {"qb_tier": 2}, "KC": {"qb_tier": 1},
+    "LAC": {"qb_tier": 2}, "LAR": {"qb_tier": 2}, "MIA": {"qb_tier": 2},
+    "MIN": {"qb_tier": 2}, "PHI": {"qb_tier": 1}, "SF": {"qb_tier": 2},
+    "TB": {"qb_tier": 2}, "WSH": {"qb_tier": 2}, "JAX": {"qb_tier": 2},
+    "SEA": {"qb_tier": 2}, "DEN": {"qb_tier": 2}, "ARI": {"qb_tier": 2},
+    "NO": {"qb_tier": 3}, "NYJ": {"qb_tier": 3}, "NYG": {"qb_tier": 3},
+    "PIT": {"qb_tier": 3}, "IND": {"qb_tier": 3}, "NE": {"qb_tier": 3},
+    "CHI": {"qb_tier": 3}, "LV": {"qb_tier": 3}, "CAR": {"qb_tier": 3},
+    "CLE": {"qb_tier": 4, "note": "backup/committee QB"},
+    "TEN": {"qb_tier": 3},
+}
+_QB_CTX_MEMO: dict = {}
+
+
+def _qb_ctx() -> dict:
+    """Team -> {qb_tier, note}. Seed overridable by data/team_qb_context.json."""
+    if _QB_CTX_MEMO:
+        return _QB_CTX_MEMO
+    ctx = dict(_QB_CTX_SEED)
+    try:
+        import os
+        import json as _json
+        path = os.path.join(os.path.dirname(__file__), "data",
+                            "team_qb_context.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                ctx.update(_json.load(f))
+    except Exception:
+        pass
+    _QB_CTX_MEMO.update(ctx)
+    return ctx
+
+
+def _cast_signal(pos, team):
+    """Supporting-cast QB-quality effect on a player's ceiling this week.
+
+    Returns (boost, why). Elite QB is a small POSITIVE ceiling raiser for
+    pass-catchers; a shaky/backup QB is a NEGATIVE cap. RBs take ~1/3 the
+    effect (less QB-dependent). QB himself and DST/K are unaffected. When the
+    team's QB tier is unknown, returns (0, "") so it never penalizes on missing
+    data.
+    """
+    if pos in ("QB", "K", "DST"):
+        return 0.0, ""
+    ctx = _qb_ctx().get((team or "").upper())
+    if not ctx:
+        return 0.0, ""
+    tier = ctx.get("qb_tier")
+    if tier is None:
+        return 0.0, ""
+    # tier -> fraction of W_CAST_MAX: 1 -> +0.5, 2 -> 0, 3 -> -0.6, 4 -> -1.0
+    frac = {1: 0.5, 2: 0.0, 3: -0.6, 4: -1.0}.get(int(tier), 0.0)
+    if pos == "RB":
+        frac *= 0.34
+    boost = round(frac * W_CAST_MAX, 2)
+    if boost == 0:
+        return 0.0, ""
+    if boost > 0:
+        why = ctx.get("note") or "elite QB lifts the pass game"
+    else:
+        why = ctx.get("note") or ("shaky QB caps the ceiling" if tier == 3
+                                  else "backup QB caps the ceiling")
+    return boost, why
 
 
 def _pace_signal(team):
@@ -396,15 +478,22 @@ def eruption_watch(players, week=None, season=None, reception: float = 0.5,
             b4, w4 = _pace_signal(team)
             if w4:
                 signals["pace"] = (b4, w4)
+            b5, w5 = _cast_signal(pos, team)
+            if w5:
+                signals["cast"] = (b5, w5)
 
-            boost = round(b1 + b2 + b3 + b4, 2)
+            boost = round(b1 + b2 + b3 + b4 + b5, 2)
             flavor = _flavor_tags(name, team, opp, injury_of)
+            # cast_quality: surfaced separately so the page can badge a capped
+            # ceiling (⚠️) even when the net boost still clears the bar.
+            cast_quality = w5 if w5 else ""
 
             why = "; ".join(f"{w} (+{b:g})" if b >= 0 else f"{w} ({b:g})"
                             for _k, (b, w) in signals.items())
             spots.append(EruptionSpot(
                 player=name, team=team, position=pos, opponent=opp,
                 ceiling_boost=boost, signals=signals, flavor=flavor,
+                cast_quality=cast_quality,
                 note=f"{name} ({pos}, {team}) vs {opp}: {why or 'no signal'}"))
         except Exception:
             continue
@@ -413,6 +502,7 @@ def eruption_watch(players, week=None, season=None, reception: float = 0.5,
     spots.sort(key=lambda s: s.ceiling_boost, reverse=True)
     cfg = {"W_VEGAS_MAX": W_VEGAS_MAX, "W_WEATHER_MAX": W_WEATHER_MAX,
            "W_MATCHUP_MAX": W_MATCHUP_MAX, "W_PACE_MAX": W_PACE_MAX,
+           "W_CAST_MAX": W_CAST_MAX,
            "ERUPTION_MIN_BOOST": ERUPTION_MIN_BOOST}
     return {"week": wk, "spots": spots[:top_n], "config": cfg}
 
