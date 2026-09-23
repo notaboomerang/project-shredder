@@ -715,6 +715,16 @@ if not ss.get("peek_mode"):
 # Betting is now just a tab, not a mode: no sidebar-hiding, no back-button trap.
 _BETTING_ONLY = (ss.get("intent") == "betting" and not ss.get("peek_mode"))
 
+# The sidebar carries DRAFT setup (mode, league, teams, rounds) only. On the
+# Team / Betting / Connect tabs it's just noise ("weird drafting stuff"), so hide
+# it there. Its widgets still execute to set defaults (e.g. `mode`); we only hide
+# the chrome. The Draft tab (and desktop default) shows it normally.
+if not ss.get("peek_mode") and ss.get("intent") not in (None, "draft"):
+    st.markdown(
+        "<style>[data-testid='stSidebar']{display:none !important;}"
+        "[data-testid='collapsedControl']{display:none !important;}</style>",
+        unsafe_allow_html=True)
+
 
 def _render_mobile_mode_picker():
     """Phone-only: pick Mock / Manual / ESPN right on the main page, so the mode
@@ -1711,22 +1721,12 @@ st.sidebar.markdown(
     '<div class="sb-brand">Project <span class="lo">Shredder</span></div>',
     unsafe_allow_html=True)
 
-# Top-level hub selector — the universal 3-way nav (Draft / Team / Odds),
-# available on desktop AND cloud. Writes ss.intent, which the terminal routes
-# below read. Keeps the landing fork and the ◀ hub button in sync.
-_HUBS = {"🎯 Draft Room": "draft", "🧠 Team Management": "team",
-         "📈 Betting Edge": "betting"}
-_hub_names = list(_HUBS.keys())
-_cur_intent = ss.get("intent") or "draft"
-_cur_hub = next((k for k, v in _HUBS.items() if v == _cur_intent), _hub_names[0])
-_hub_choice = st.sidebar.radio("Section", _hub_names,
-                               index=_hub_names.index(_cur_hub),
-                               key="hub_radio",
-                               help="Draft = live-draft copilot · Team = manage "
-                                    "your drafted rosters · Odds = betting edge.")
-if _HUBS[_hub_choice] != _cur_intent:
-    ss.intent = _HUBS[_hub_choice]
-    st.rerun()
+# NOTE: top-level navigation is the persistent TOP TAB BAR (Team / Draft /
+# Betting / Connect) rendered near the masthead — it writes ss.intent. The old
+# sidebar "Section" radio was a SECOND nav that also wrote ss.intent and, having
+# no "connect" option, silently overwrote intent="connect" back to a hub on
+# rerun (which made the Connect tab appear to do nothing). Removed. The sidebar
+# now only carries draft mode + league settings, used by the Draft tab.
 
 _MODES = ["Mock", "Manual", "ESPN"]
 mode = st.sidebar.radio("How are you drafting?", _MODES,
