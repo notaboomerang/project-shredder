@@ -22,12 +22,16 @@ from typing import Optional
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 _LEDGER = os.path.join(_DATA_DIR, "erupt_ledger.json")
 
-# A logged call counts as a HIT if the player's actual fantasy points clear this
-# many points (a "smash" threshold). Position-aware so a K/DST isn't held to a
-# WR bar.
+# A logged ERUPT call HITs if actual points clear this "smash" bar (position-aware).
 _HIT_THRESHOLD = {"QB": 22.0, "RB": 18.0, "WR": 17.0, "TE": 14.0,
                   "K": 12.0, "DST": 12.0}
 _HIT_DEFAULT = 16.0
+
+# A logged STINKER call (predicted to bust) HITs if actual points fall BELOW this
+# floor — i.e. the player genuinely stunk as predicted. Position-aware.
+_STINKER_FLOOR = {"QB": 14.0, "RB": 9.0, "WR": 8.0, "TE": 6.0,
+                  "K": 6.0, "DST": 5.0}
+_STINKER_DEFAULT = 8.0
 
 
 @dataclass
@@ -39,11 +43,13 @@ class EruptCall:
     team: str
     opponent: str
     ceiling_boost: float
+    kind: str = "erupt"               # "erupt" (smash) | "stinker" (bust)
     cast_quality: str = ""            # QB/supporting-cast note at call time
     note: str = ""
     logged_at: str = ""               # ISO timestamp
     actual_points: Optional[float] = None   # filled in when scored
     result: str = ""                  # "" | "HIT" | "MISS"
+    threshold: Optional[float] = None       # the bar used to grade (for transparency)
 
 
 def _read() -> list[dict]:
@@ -66,15 +72,17 @@ def _write(records: list[dict]) -> None:
 
 
 def _key(rec: dict) -> tuple:
-    return (rec.get("season"), rec.get("week"), (rec.get("player") or "").lower())
+    return (rec.get("season"), rec.get("week"), (rec.get("player") or "").lower(),
+            rec.get("kind", "erupt"))
 
 
 def log_calls(spots, season: int, week: int, min_boost: float = 5.0,
-              top_n: int = 15) -> int:
+              top_n: int = 15, kind: str = "erupt") -> int:
     """Record the top eruption spots for a week. `spots` are EruptionSpot-like
     objects (or dicts) with player/position/team/opponent/ceiling_boost/
-    cast_quality/note. Idempotent per (season, week, player). Returns the number
-    of records written/updated. Never raises."""
+    cast_quality/note. `kind` is "erupt" (predicted smash) or "stinker"
+    (predicted bust). Idempotent per (season, week, player, kind). Returns the
+    number of records written/updated. Never raises."""
     try:
         existing = _read()
         by_key = {_key(r): r for r in existing}
@@ -92,6 +100,7 @@ def log_calls(spots, season: int, week: int, min_boost: float = 5.0,
                 player=_get(s, "player", ""), position=_get(s, "position", ""),
                 team=_get(s, "team", ""), opponent=_get(s, "opponent", ""),
                 ceiling_boost=round(boost, 2),
+                kind=kind,
                 cast_quality=_get(s, "cast_quality", "") or "",
                 note=_get(s, "note", "") or "",
                 logged_at=now,
@@ -103,6 +112,7 @@ def log_calls(spots, season: int, week: int, min_boost: float = 5.0,
                 prev = by_key[k]
                 rec["actual_points"] = prev.get("actual_points")
                 rec["result"] = prev.get("result", "")
+                rec["threshold"] = prev.get("threshold")
                 rec["logged_at"] = prev.get("logged_at", now)
                 by_key[k].update(rec)
             else:
@@ -113,6 +123,15 @@ def log_calls(spots, season: int, week: int, min_boost: float = 5.0,
         return n
     except Exception:
         return 0
+
+
+def log_stinkers(spots, season: int, week: int, min_boost: float = 5.0,
+                 top_n: int = 15) -> int:
+    """Record the top STINKER calls (players predicted to bust) for a week.
+    Same shape as log_calls; `ceiling_boost` here is the magnitude of the
+    downgrade signal. Idempotent per (season, week, player, kind='stinker')."""
+    return log_calls(spots, season, week, min_boost=min_boost, top_n=top_n,
+                     kind="stinker")
 
 
 def score_week(points_by_norm_name: dict, season: int, week: int,
@@ -133,10 +152,20 @@ def score_week(points_by_norm_name: dict, season: int, week: int,
             pts = points_by_norm_name.get(norm_fn(r.get("player", "")))
             if pts is None:
                 continue
-            thr = _HIT_THRESHOLD.get((r.get("position") or "").upper(),
-                                     _HIT_DEFAULT)
-            r["actual_points"] = round(float(pts), 2)
-            r["result"] = "HIT" if float(pts) >= thr else "MISS"
+            pos = (r.get("position") or "").upper()
+            kind = r.get("kind", "erupt")
+            pts = float(pts)
+            if kind == "stinker":
+                # HIT when the player busted (scored BELOW the floor) as predicted.
+                floor = _STINKER_FLOOR.get(pos, _STINKER_DEFAULT)
+                r["threshold"] = floor
+                r["result"] = "HIT" if pts <= floor else "MISS"
+            else:
+                # erupt: HIT when the player smashed (cleared the bar).
+                thr = _HIT_THRESHOLD.get(pos, _HIT_DEFAULT)
+                r["threshold"] = thr
+                r["result"] = "HIT" if pts >= thr else "MISS"
+            r["actual_points"] = round(pts, 2)
             scored += 1
         _write(recs)
         return scored
@@ -155,20 +184,31 @@ def load(season: Optional[int] = None, week: Optional[int] = None) -> list[dict]
                   reverse=True)
 
 
-def hit_rate(season: Optional[int] = None) -> dict:
-    """Summary of scored calls: {scored, hits, misses, hit_rate, pending}."""
-    recs = load(season=season)
-    scored = [r for r in recs if r.get("result") in ("HIT", "MISS")]
-    hits = sum(1 for r in scored if r["result"] == "HIT")
-    pending = sum(1 for r in recs if not r.get("result"))
-    n = len(scored)
+def hit_rate(season: Optional[int] = None, week: Optional[int] = None) -> dict:
+    """Accuracy summary of scored calls, broken out by call kind so eruption and
+    stinker accuracy are tracked SEPARATELY. Returns overall plus a per-kind
+    split: {overall:{...}, by_kind:{erupt:{...}, stinker:{...}}}."""
+    recs = load(season=season, week=week)
+
+    def _summ(rows):
+        scored = [r for r in rows if r.get("result") in ("HIT", "MISS")]
+        hits = sum(1 for r in scored if r["result"] == "HIT")
+        pending = sum(1 for r in rows if not r.get("result"))
+        n = len(scored)
+        return {
+            "scored": n,
+            "hits": hits,
+            "misses": n - hits,
+            "hit_rate": round(hits / n, 3) if n else None,
+            "pending": pending,
+            "total": len(rows),
+        }
+
+    erupts = [r for r in recs if r.get("kind", "erupt") == "erupt"]
+    stinkers = [r for r in recs if r.get("kind") == "stinker"]
     return {
-        "scored": n,
-        "hits": hits,
-        "misses": n - hits,
-        "hit_rate": round(hits / n, 3) if n else None,
-        "pending": pending,
-        "total": len(recs),
+        "overall": _summ(recs),
+        "by_kind": {"erupt": _summ(erupts), "stinker": _summ(stinkers)},
     }
 
 
