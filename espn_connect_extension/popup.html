@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 300px; margin: 0; padding: 16px;
+           font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+           background: #0e1117; color: #e6e6e6; }
+    h1 { font-size: 15px; margin: 0 0 4px; }
+    p  { margin: 0 0 12px; color: #9aa0aa; font-size: 12.5px; }
+    button { width: 100%; padding: 12px; border: none; border-radius: 10px;
+             background: #31c48d; color: #06231a; font-weight: 800;
+             font-size: 15px; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: default; }
+    #status { margin-top: 12px; font-size: 12.5px; min-height: 18px; }
+    .ok   { color: #31c48d; font-weight: 700; }
+    .err  { color: #f9736b; font-weight: 700; }
+    .hint { color: #9aa0aa; }
+    a { color: #31c48d; }
+  </style>
+</head>
+<body>
+  <h1>🏈 Connect ESPN → Shredder</h1>
+  <p>Reads your ESPN login cookies and opens Project Shredder already connected.
+     Nothing is stored anywhere but your own browser.</p>
+  <button id="go">Connect to Shredder</button>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
