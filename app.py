@@ -577,56 +577,19 @@ _password_gate()
 
 
 def _intent_gate():
-    """First-run 'what are you here to do?' screen. ONE clear fork so people
-    aren't staring at every path at once:
-      • Draft on this device  -> the normal setup (ESPN / Mock / Manual).
-      • Just watch (peek)      -> scan the QR from the computer running the draft.
-    Only shows on the hosted app, only until answered, and NEVER for a peek link
-    (those carry ?peek=1 and flow straight to the read-only board). Desktop skips
-    it entirely so nothing changes there."""
-    if not IS_CLOUD or ss.get("peek_mode") or ss.get("intent"):
+    """First-run default: no more full-screen fork. Navigation is a persistent
+    top tab bar (rendered after the masthead), so every section is one click away
+    at all times. This just picks a sensible DEFAULT tab and returns — it never
+    stops the script. Desktop and peek links are unaffected."""
+    if ss.get("peek_mode"):
         return
-    # already connected / mid-draft in this session? skip the gate.
-    if ss.get("espn") is not None or ss.get("mock_on"):
-        ss.intent = "draft"
-        return
-
-    _render_masthead()
-    st.markdown("### Welcome — what are you here to do?")
-
-    # Option B landing hub: Team Management is the PRIMARY (the season is long,
-    # the draft is one day), with Draft Room + Betting Edge as secondary cards.
-    pcol, scol = st.columns([1.4, 1])
-    with pcol:
-        st.markdown(
-            "#### 🧠 Team Management\n"
-            "Your **already-drafted rosters**, pulled live from ESPN. Who to "
-            "start, which benched player is about to erupt, and the waiver adds "
-            "predicted to smash this week 🌋 — every erupt call logged to a "
-            "ledger so you can check the hit-rate.")
-        if st.button("Open my teams →", type="primary",
-                     use_container_width=True, key="intent_team"):
-            ss.intent = "team"
-            st.rerun()
-    with scol:
-        st.markdown(
-            "#### 🎯 Draft Room\n"
-            "Live-draft copilot — best-pick board, VORP, opponent DNA, snake "
-            "queue.")
-        if st.button("Enter draft", use_container_width=True,
-                     key="intent_draft"):
+    if not ss.get("intent"):
+        # already connected / mid-draft? land on Draft; otherwise Team is home.
+        if ss.get("espn") is not None or ss.get("mock_on"):
             ss.intent = "draft"
-            st.rerun()
-        st.markdown(
-            "#### 📈 Betting Edge\n"
-            "Live win-prob vs the market, line shopping, and player props. No "
-            "login needed.")
-        if st.button("Open odds", use_container_width=True,
-                     key="intent_betting"):
-            ss.intent = "betting"
-            st.rerun()
-    st.caption("You can switch anytime — every screen has a ◀ hub button.")
-    st.stop()
+        else:
+            ss.intent = "team"
+    return
 
 
 def _render_watch_help():
@@ -731,30 +694,26 @@ if ss.get("intent") == "watch" and not ss.get("peek_mode"):
 
 _render_masthead()
 
-# Persistent hub navigation: once you've entered a section (Draft / Team / Odds)
-# a "◀ hub" button returns to the landing fork. Replaces the old horizontal
-# radio as the primary way to move between the three top-level areas. Only shown
-# when a section is active and not in the read-only peek mirror.
-if ss.get("intent") and not ss.get("peek_mode"):
-    _hb = st.columns([1, 5])
-    _labels = {"team": "🧠 Team Management", "draft": "🎯 Draft Room",
-               "betting": "📈 Betting Edge"}
-    if _hb[0].button("◀ hub", key="hub_back",
-                     help="Back to Draft / Team / Odds"):
-        ss.intent = None
-        st.rerun()
-    _hb[1].caption(_labels.get(ss.get("intent"), ""))
+# ── PERSISTENT TOP NAV ─────────────────────────────────────────────────────
+# One always-visible tab row. Tabs, not modes: every section is one click from
+# every other, nothing gets hidden, so there is no "stuck / no way back" state.
+# Writes ss.intent; the terminal route blocks below dispatch on it.
+if not ss.get("peek_mode"):
+    _NAV = [("team", "🧠 Team"), ("draft", "🎯 Draft"),
+            ("betting", "📈 Betting"), ("connect", "🔌 Connect")]
+    _cur = ss.get("intent") or "team"
+    _ncols = st.columns(len(_NAV))
+    for _i, (_key, _label) in enumerate(_NAV):
+        _is_cur = (_cur == _key)
+        if _ncols[_i].button(_label, key=f"nav_{_key}",
+                             type=("primary" if _is_cur else "secondary"),
+                             use_container_width=True):
+            ss.intent = _key
+            st.rerun()
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-# Betting-edge shortcut (chosen from the welcome fork): skip ALL the ESPN/mock/
-# draft setup below and render only the betting hub. The render functions are
-# defined much further down, so we can't call them here — instead we set a flag,
-# render the back button now, and let the guarded blocks below skip straight to
-# the betting render that lives right after those functions are defined.
+# Betting is now just a tab, not a mode: no sidebar-hiding, no back-button trap.
 _BETTING_ONLY = (ss.get("intent") == "betting" and not ss.get("peek_mode"))
-if _BETTING_ONLY:
-    if st.button("← Back", key="betting_back"):
-        ss.intent = None
-        st.rerun()
 
 
 def _render_mobile_mode_picker():
@@ -776,11 +735,9 @@ def _render_mobile_mode_picker():
 
 
 if _BETTING_ONLY:
-    # betting-only screen: no draft-mode picker, and hide the draft sidebar
-    # entirely (its widgets still run to set defaults, just not shown).
-    st.markdown("<style>[data-testid='stSidebar']{display:none !important;}"
-                "[data-testid='collapsedControl']{display:none !important;}</style>",
-                unsafe_allow_html=True)
+    # Betting is a tab now, NOT a mode: keep the sidebar accessible (no hiding),
+    # just skip the draft-mode picker since it's irrelevant here.
+    pass
 elif not st.session_state.get("peek_mode"):
     _render_mobile_mode_picker()
 else:
@@ -1475,85 +1432,42 @@ def _render_peek_share(cfg, container):
 
 
 def _render_bookmarklet_body(container, use_expander=True):
-    """Shared body for the one-tap login setup; `container` is st or st.sidebar.
+    """Shared body for the one-click login setup; `container` is st or st.sidebar.
     When `use_expander` is False the caller has already opened a disclosure
-    (Streamlit forbids nested expanders), so we render inline instead."""
-    import json as _json
+    (Streamlit forbids nested expanders), so we render inline instead.
+
+    NOTE: this used to render a bookmarklet, but ESPN's espn_s2 + SWID cookies are
+    HttpOnly — page JS (and therefore any bookmarklet) CANNOT read them. The only
+    client-side path that works is a browser extension using the privileged
+    cookies API, so we point the user at the bundled 'Shredder ESPN Connect'
+    extension instead. It opens the app with ?espn_s2=&swid=, the same one-tap
+    ingest the URL path already handles."""
     import contextlib
-    import streamlit.components.v1 as _components
-    base = _app_base_url()
-    bm = _bookmarklet_js(base)
-    bm_js = _json.dumps(bm)          # safe-embed the bookmarklet as a JS string
-    accent = "#31c48d"
-    _ctx = (container.expander("📲 One-tap login — set up once (~30s)", expanded=False)
+    _ctx = (container.expander("🧩 One-click login — install the ESPN Connect extension (~30s)",
+                               expanded=False)
             if use_expander else contextlib.nullcontext())
     with _ctx:
-        st.caption("The easiest way to connect. Do this once; after that it's a "
-                   "single tap every draft. Your cookies go straight from ESPN "
-                   "into your own private session — never stored on the server.")
-        _components.html(f"""
-<div id="wrap" style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#e6e6e6;">
-  <button id="copybtn" style="width:100%;padding:12px;border:none;border-radius:10px;
-     background:{accent};color:#06231a;font-weight:800;font-size:15px;cursor:pointer;">
-     1️⃣  Copy my Shredder login</button>
-  <div id="copied" style="display:none;margin:6px 0 0;color:{accent};font-weight:700;">
-     ✓ Copied — now do step 2 below.</div>
-
-  <div id="ios" style="display:none;margin-top:14px;">
-    <b>iPhone (Safari) — one time:</b>
-    <ol style="margin:6px 0 0 18px;padding:0;">
-      <li>Tap <b>Share</b> → <b>Add Bookmark</b> → Save.</li>
-      <li>Tap the <b>book</b> icon → <b>Edit</b> → open that bookmark.</li>
-      <li>Clear the address line, <b>paste</b>, name it <b>Shredder</b> → Done.</li>
-    </ol>
-  </div>
-  <div id="android" style="display:none;margin-top:14px;">
-    <b>Android (Chrome) — one time:</b>
-    <ol style="margin:6px 0 0 18px;padding:0;">
-      <li>Tap <b>⋮</b> → the <b>★</b> to bookmark this page.</li>
-      <li>Tap <b>⋮ → Bookmarks</b>, open it → <b>Edit</b> (pencil).</li>
-      <li>Replace the URL with the <b>pasted</b> code, name it <b>Shredder</b> → save.</li>
-    </ol>
-  </div>
-  <div id="desktop" style="display:none;margin-top:14px;">
-    <b>Computer — one time:</b> drag this button to your bookmarks bar →
-    <a id="dtlink" href="#" style="display:inline-block;padding:5px 10px;border:1px solid {accent};
-       border-radius:8px;color:{accent};text-decoration:none;font-weight:700;">🔗 Shredder login</a>
-  </div>
-
-  <div style="margin-top:14px;padding-top:10px;border-top:1px solid #2a2a2a;">
-    <b>Every draft (the easy part):</b>
-    <ol style="margin:6px 0 0 18px;padding:0;">
-      <li>Open <b>fantasy.espn.com</b>, make sure you're logged in.</li>
-      <li>Tap your <b>Shredder</b> bookmark.</li>
-      <li>You land back here <b>already connected</b>.</li>
-    </ol>
-  </div>
-</div>
-<script>
-  var BM = {bm_js};
-  var ua = navigator.userAgent || "";
-  var isIOS = /iPhone|iPad|iPod/i.test(ua);
-  var isAnd = /Android/i.test(ua);
-  document.getElementById(isIOS?'ios':(isAnd?'android':'desktop')).style.display='block';
-  var dl = document.getElementById('dtlink'); if(dl) dl.setAttribute('href', BM);
-  var btn = document.getElementById('copybtn');
-  btn.addEventListener('click', function(){{
-    function ok(){{ document.getElementById('copied').style.display='block'; }}
-    try {{
-      if (navigator.clipboard && navigator.clipboard.writeText) {{
-        navigator.clipboard.writeText(BM).then(ok, function(){{ fallback(); }});
-      }} else {{ fallback(); }}
-    }} catch(e) {{ fallback(); }}
-    function fallback(){{
-      var t=document.createElement('textarea'); t.value=BM;
-      document.body.appendChild(t); t.select();
-      try{{ document.execCommand('copy'); ok(); }}catch(e){{ alert('Copy this:\\n\\n'+BM); }}
-      document.body.removeChild(t);
-    }}
-  }});
-</script>
-""", height=430)
+        st.markdown(
+            "ESPN's login cookies are **HttpOnly**, so a bookmarklet can't read "
+            "them — only a small browser extension can (the same way ESPN cookie "
+            "finders work). Install ours once and connecting is one click, "
+            "forever. Your cookies go straight from ESPN into your own private "
+            "session — never stored on the server.")
+        st.markdown(
+            "**Install (one time):**\n"
+            "1. Open `chrome://extensions` (Edge: `edge://extensions`).\n"
+            "2. Turn on **Developer mode** (top-right).\n"
+            "3. Click **Load unpacked** and select the "
+            "`espn_connect_extension` folder that ships with Shredder.\n"
+            "4. Pin the 🏈 **Shredder** icon to your toolbar.")
+        st.markdown(
+            "**Every time (the easy part):**\n"
+            "1. Be logged in at **fantasy.espn.com**.\n"
+            "2. Click the 🏈 **Shredder** toolbar icon → **Connect to Shredder**.\n"
+            "3. You land back here **already connected** — no typing, no cookies.")
+        st.caption("No computer / can't install an extension? Use the manual "
+                   "paste above (DevTools → Application → Cookies → copy espn_s2 "
+                   "and SWID). That always works, it's just two more steps.")
 
 
 def _grade_team(players, cfg, scoring_key):
@@ -2048,10 +1962,10 @@ elif mode == "ESPN":
                                 "Chromium it opens, and open your draft room "
                                 "there. Picks sync automatically — no cookies.")
 
-        # ONE-TAP bookmarklet demoted to Advanced (QR peek covers the common
-        # phone case now, so this is only for 'connect on my phone, no computer').
+        # ONE-CLICK login via the ESPN Connect browser extension (reads the
+        # HttpOnly cookies a bookmarklet can't). Surfaced when not yet connected.
         if IS_CLOUD and not have_ck:
-            with st.sidebar.expander("⚙️ Advanced: one-tap login", expanded=False):
+            with st.sidebar.expander("🧩 One-click login (browser extension)", expanded=False):
                 _render_bookmarklet_setup()
 
         # ---- auto-discover: paste cookies, then pick your league ----
@@ -2162,7 +2076,7 @@ def _render_espn_connect_main(cfg):
                    "fantasy.espn.com: DevTools (F12) → Application → Cookies → "
                    "copy `espn_s2` and `SWID`.")
         if IS_CLOUD:
-            with st.expander("⚙️ Advanced: one-tap login (no computer handy)",
+            with st.expander("🧩 One-click login (browser extension)",
                              expanded=False):
                 _render_bookmarklet_setup_main()
     else:
@@ -3039,6 +2953,12 @@ def _render_report_card():
 # render the hub and stop — the draft board/setup above was skipped for it.
 if _BETTING_ONLY:
     _render_betting_edge()
+    st.stop()
+
+# Connect tab (from the top nav): show the ESPN connect panel directly, so
+# connecting is one click from anywhere instead of buried in the sidebar.
+if ss.get("intent") == "connect" and not ss.get("peek_mode"):
+    _render_espn_connect_main(cfg)
     st.stop()
 
 # Team Management hub (from the landing fork): load already-drafted rosters from

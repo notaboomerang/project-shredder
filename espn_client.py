@@ -490,6 +490,76 @@ class EspnClient:
                 out[_norm_name(nm)] = float(pts)
         return out
 
+    def free_agents(self, limit: int = 300, scoring_period: int = 0) -> dict:
+        """ESPN's REAL free-agent / waiver pool for this league — the actual
+        available players ESPN shows, NOT a synthetic pool-minus-rostered set.
+
+        Pulls kona_player_info filtered to FREEAGENT + WAIVERS status. Returns
+        {'players': [ {name, position, pro_team, avail_status ('FA'|'WAIVER'),
+                        percent_owned, injury} ... ],
+         'names': set[str]}.
+
+        avail_status distinguishes a straight free agent from a player on
+        waivers (must clear/claim). percent_owned is ESPN's rostered% (a proxy
+        for demand). Never raises — returns empty on failure.
+        """
+        url = (f"{READS_HOST}/apis/v3/games/ffl/seasons/{self.season}"
+               f"/segments/0/leagues/{self.league_id}")
+        # filterStatus FREEAGENT + WAIVERS = the actual available pool. ESPN
+        # requires a sort when a limit is set; sort by percent owned desc so the
+        # most-relevant adds come first.
+        flt = {
+            "players": {
+                "filterStatus": {"value": ["FREEAGENT", "WAIVERS"]},
+                "limit": int(limit),
+                "sortPercOwned": {"sortAsc": False, "sortPriority": 1},
+            }
+        }
+        params = [("view", "kona_player_info")]
+        if scoring_period:
+            params.append(("scoringPeriodId", int(scoring_period)))
+        headers = {"x-fantasy-filter": json.dumps(flt)}
+        try:
+            r = self.sess.get(url, params=params, headers=headers,
+                              timeout=self.timeout)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            return {"players": [], "names": set()}
+
+        # ESPN status ints: 0/undrafted-ish vary; the reliable signal is the
+        # 'onTeamId' (0 = not on a team) plus the waiver flag on the entry.
+        _WAIVER = {"WAIVERS", "ONHOLD"}
+        out = []
+        names: set[str] = set()
+        for pe in (data.get("players") or []):
+            pp = pe.get("player") or {}
+            nm = pp.get("fullName")
+            if not nm:
+                continue
+            status = (pe.get("status") or "").upper()
+            # waiver vs free agent: ESPN marks waiver-locked players with a
+            # WAIVERS/ONHOLD status; everything else in this filtered pool is FA
+            avail = "WAIVER" if status in _WAIVER else "FA"
+            pos = ESPN_POS.get(pp.get("defaultPositionId"), "")
+            pro = ESPN_PRO_TEAM.get(pp.get("proTeamId"),
+                                    str(pp.get("proTeamId", "")))
+            pct = None
+            own = pp.get("ownership") or {}
+            if isinstance(own, dict):
+                pct = own.get("percentOwned")
+            out.append({
+                "name": nm,
+                "position": pos,
+                "pro_team": pro,
+                "avail_status": avail,
+                "percent_owned": round(pct, 1) if isinstance(pct, (int, float))
+                else None,
+                "injury": pp.get("injuryStatus") or "",
+            })
+            names.add(nm)
+        return {"players": out, "names": names}
+
     # ---- player id -> name/pos resolution ----
     def _ensure_players(self, data: dict) -> None:
         """Cache player metadata from any view that carries roster player entries."""

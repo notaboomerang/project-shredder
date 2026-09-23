@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Shredder ESPN Connect",
+  "version": "1.0.0",
+  "description": "One-click connect your ESPN fantasy league to Project Shredder — reads your espn_s2 + SWID cookies (which JavaScript alone cannot) and opens Shredder already logged in.",
+  "permissions": ["cookies", "tabs"],
+  "host_permissions": [
+    "https://*.espn.com/",
+    "https://shreddies.streamlit.app/"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Connect ESPN to Shredder"
+  },
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
