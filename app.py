@@ -2138,7 +2138,30 @@ def _render_espn_connect_main(cfg):
 
 _ready = (mode == "Manual") or (mode == "Mock" and ss.mock_on) \
     or (mode == "ESPN" and ss.espn is not None)
-if not _ready and not _BETTING_ONLY:
+# Only the DRAFT tab renders the draft board / mock "how it works". The Team,
+# Betting, and Connect tabs have their own terminal routes further down, so the
+# not-ready short-circuit here must NOT fire for them (it used to st.stop() on
+# the default Mock mode and swallow the Team tab). Peek mode is its own board.
+_DRAFT_TAB = ss.get("peek_mode") or ss.get("intent") in (None, "draft")
+
+# EARLY TAB DISPATCH: Team and Connect have nothing to do with the draft board
+# that renders below, so route them here before any board code runs. (Betting
+# is handled by _BETTING_ONLY, which already skips the board and renders at its
+# own late route once _render_betting_edge is defined.)
+if not ss.get("peek_mode"):
+    if ss.get("intent") == "connect":
+        _render_espn_connect_main(cfg)
+        st.stop()
+    if ss.get("intent") == "team":
+        if TM is None:
+            st.error("Team Management module unavailable.")
+            st.stop()
+        _tm_week = ss.get("_espn_week") or 1
+        TM.render(ss, pool, cfg, scoring_key, espn=ss.get("espn"),
+                  default_week=int(_tm_week))
+        st.stop()
+
+if not _ready and not _BETTING_ONLY and _DRAFT_TAB:
     if mode == "Mock":
         st.info("Hit **Start / restart mock** in the sidebar to practice against "
                 "AI bots that draft between your turns.")
@@ -2949,28 +2972,14 @@ def _render_report_card():
                "constants to re-tune.")
 
 
-# Betting-only mode (from the welcome fork): the functions exist by now, so
-# render the hub and stop — the draft board/setup above was skipped for it.
+# Betting-only mode (from the top nav): the functions exist by now, so render
+# the hub and stop — the draft board/setup above was skipped for it.
 if _BETTING_ONLY:
     _render_betting_edge()
     st.stop()
 
-# Connect tab (from the top nav): show the ESPN connect panel directly, so
-# connecting is one click from anywhere instead of buried in the sidebar.
-if ss.get("intent") == "connect" and not ss.get("peek_mode"):
-    _render_espn_connect_main(cfg)
-    st.stop()
-
-# Team Management hub (from the landing fork): load already-drafted rosters from
-# ESPN and render start/sit + erupt-on-bench + waiver eruptions + the ledger.
-if ss.get("intent") == "team" and not ss.get("peek_mode"):
-    if TM is None:
-        st.error("Team Management module unavailable.")
-        st.stop()
-    _tm_week = ss.get("_espn_week") or 1
-    TM.render(ss, pool, cfg, scoring_key, espn=ss.get("espn"),
-              default_week=int(_tm_week))
-    st.stop()
+# NOTE: the Team and Connect tabs are dispatched EARLY (before the draft board),
+# so no late route for them is needed here.
 
 if _view == "📈 Betting edge":
     _render_betting_edge()
