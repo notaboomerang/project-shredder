@@ -10,8 +10,9 @@
     "cast_quality": "Josh Allen",
     "note": "Dalton Kincaid (TE, BUF) vs DET: dome \u2014 no weather risk (+3); soft vs DET (+14.89 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Josh Allen (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 19.0,
+    "result": "HIT",
+    "threshold": 14.0
   },
   {
     "season": 2026,
@@ -24,8 +25,9 @@
     "cast_quality": "Patrick Mahomes",
     "note": "Xavier Worthy (WR, KC) vs IND: dome \u2014 no weather risk (+3); soft vs IND (+10.59 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Patrick Mahomes (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 11.0,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -38,8 +40,9 @@
     "cast_quality": "Patrick Mahomes",
     "note": "Travis Kelce (TE, KC) vs IND: dome \u2014 no weather risk (+3); soft vs IND (+4.64 pts/g) (+3.09); fast pace (~11.8 drives/g) (+0.62); Patrick Mahomes (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 20.6,
+    "result": "HIT",
+    "threshold": 14.0
   },
   {
     "season": 2026,
@@ -52,8 +55,9 @@
     "cast_quality": "Jalen Hurts",
     "note": "Dontayvion Wicks (WR, PHI) vs TEN: clean weather (79F) (+1.5); soft vs TEN (+8.09 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Jalen Hurts (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 9.9,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -66,8 +70,9 @@
     "cast_quality": "Jalen Hurts",
     "note": "DeVonta Smith (WR, PHI) vs TEN: clean weather (79F) (+1.5); soft vs TEN (+8.09 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Jalen Hurts (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 22.7,
+    "result": "HIT",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -80,8 +85,9 @@
     "cast_quality": "Jalen Hurts",
     "note": "Makai Lemon (WR, PHI) vs TEN: clean weather (79F) (+1.5); soft vs TEN (+8.09 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Jalen Hurts (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 1.4,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -94,8 +100,9 @@
     "cast_quality": "",
     "note": "Jaxon Smith-Njigba (WR, SEA) vs ARI: dome \u2014 no weather risk (+3); soft vs ARI (+8.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 38.0,
+    "result": "HIT",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -108,8 +115,9 @@
     "cast_quality": "",
     "note": "Josh Allen (QB, BUF) vs DET: dome \u2014 no weather risk (+3); soft vs DET (+15.54 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 40.82,
+    "result": "HIT",
+    "threshold": 22.0
   },
   {
     "season": 2026,
@@ -122,8 +130,9 @@
     "cast_quality": "",
     "note": "Patrick Mahomes (QB, KC) vs IND: dome \u2014 no weather risk (+3); soft vs IND (+10.5 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 28.98,
+    "result": "HIT",
+    "threshold": 22.0
   },
   {
     "season": 2026,
@@ -136,8 +145,9 @@
     "cast_quality": "",
     "note": "Joe Burrow (QB, CIN) vs HOU: dome \u2014 no weather risk (+3); soft vs HOU (+8.45 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 16.18,
+    "result": "MISS",
+    "threshold": 22.0
   },
   {
     "season": 2026,
@@ -150,8 +160,9 @@
     "cast_quality": "",
     "note": "Rashid Shaheed (WR, SEA) vs ARI: dome \u2014 no weather risk (+3); soft vs ARI (+8.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 5.4,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -164,8 +175,9 @@
     "cast_quality": "",
     "note": "Cooper Kupp (WR, SEA) vs ARI: dome \u2014 no weather risk (+3); soft vs ARI (+8.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 3.0,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -178,8 +190,9 @@
     "cast_quality": "Lamar Jackson",
     "note": "Rashod Bateman (WR, BAL) vs NO: dome \u2014 no weather risk (+3); soft vs NO (+2.49 pts/g) (+1.66); fast pace (~11.8 drives/g) (+0.62); Lamar Jackson (+2)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 18.3,
+    "result": "HIT",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -192,8 +205,9 @@
     "cast_quality": "Lamar Jackson",
     "note": "Derrick Henry (RB, BAL) vs NO: dome \u2014 no weather risk (+1.5); soft vs NO (+8.05 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Lamar Jackson (+0.68)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 16.2,
+    "result": "MISS",
+    "threshold": 18.0
   },
   {
     "season": 2026,
@@ -206,8 +220,9 @@
     "cast_quality": "Patrick Mahomes",
     "note": "Kenneth Walker (RB, KC) vs IND: dome \u2014 no weather risk (+1.5); soft vs IND (+12.55 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Patrick Mahomes (+0.68)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 20.8,
+    "result": "HIT",
+    "threshold": 18.0
   },
   {
     "season": 2026,
@@ -220,8 +235,9 @@
     "cast_quality": "",
     "note": "Amon-Ra St. Brown (WR, DET) vs BUF: clean weather (55F) (+1.5); soft vs BUF (+9.94 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 30.7,
+    "result": "HIT",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -234,8 +250,9 @@
     "cast_quality": "",
     "note": "Chris Godwin Jr. (WR, TB) vs CLE: clean weather (60F) (+1.5); soft vs CLE (+8.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 7.3,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -248,8 +265,9 @@
     "cast_quality": "",
     "note": "CeeDee Lamb (WR, DAL) vs WAS: clean weather (68F) (+1.5); soft vs WAS (+6.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 31.3,
+    "result": "HIT",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -262,8 +280,9 @@
     "cast_quality": "",
     "note": "Emeka Egbuka (WR, TB) vs CLE: clean weather (60F) (+1.5); soft vs CLE (+8.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 8.8,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -276,8 +295,9 @@
     "cast_quality": "",
     "note": "Jared Goff (QB, DET) vs BUF: clean weather (55F) (+1.5); soft vs BUF (+7.65 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 29.78,
+    "result": "HIT",
+    "threshold": 22.0
   },
   {
     "season": 2026,
@@ -290,8 +310,9 @@
     "cast_quality": "",
     "note": "Jalen McMillan (WR, TB) vs CLE: clean weather (60F) (+1.5); soft vs CLE (+8.79 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 0.0,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -304,8 +325,9 @@
     "cast_quality": "Caleb Williams",
     "note": "Rome Odunze (WR, CHI) vs MIN: dome \u2014 no weather risk (+3); soft vs MIN (+6.24 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Caleb Williams (-2.4)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 5.8,
+    "result": "MISS",
+    "threshold": 17.0
   },
   {
     "season": 2026,
@@ -318,7 +340,8 @@
     "cast_quality": "Caleb Williams",
     "note": "Luther Burden III (WR, CHI) vs MIN: dome \u2014 no weather risk (+3); soft vs MIN (+6.24 pts/g) (+4); fast pace (~11.8 drives/g) (+0.62); Caleb Williams (-2.4)",
     "logged_at": "2026-09-21T15:11:53+00:00",
-    "actual_points": null,
-    "result": ""
+    "actual_points": 4.7,
+    "result": "MISS",
+    "threshold": 17.0
   }
 ]

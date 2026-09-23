@@ -704,15 +704,25 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
 
 
 def _current_week() -> int:
-    """Best-effort current NFL week (1-18). Regular season ≈ first Thu after Labor
-    Day; before kickoff we return 1. Purely for schedule lookup, so an off-by-one
-    near a boundary only shifts which opponent is read — never raises."""
+    """Best-effort current NFL week (1-18). Anchored to the season's real Week 1
+    Thursday opener; before kickoff we return 1. Purely for schedule lookup, so an
+    off-by-one near a boundary only shifts which opponent is read — never raises."""
     import datetime as _dt
     today = _dt.date.today()
     yr = today.year if today.month >= 8 else today.year - 1
-    sep1 = _dt.date(yr, 9, 1)
-    first_mon = sep1 + _dt.timedelta(days=(7 - sep1.weekday()) % 7)  # Labor Day
-    kickoff = first_mon + _dt.timedelta(days=3)                       # Thu after
+    # Known Week-1 Thursday openers (the NFL opener is not a fixed offset from
+    # Labor Day — it varies year to year, so pin the real dates we know).
+    KNOWN_OPENERS = {
+        2024: _dt.date(2024, 9, 5),
+        2025: _dt.date(2025, 9, 4),
+        2026: _dt.date(2026, 9, 3),
+    }
+    kickoff = KNOWN_OPENERS.get(yr)
+    if kickoff is None:
+        # Fallback for unmapped seasons: Thursday of Labor Day week.
+        sep1 = _dt.date(yr, 9, 1)
+        first_mon = sep1 + _dt.timedelta(days=(7 - sep1.weekday()) % 7)  # Labor Day
+        kickoff = first_mon - _dt.timedelta(days=4)                       # prior Thu
     if today < kickoff:
         return 1
     return min(18, (today - kickoff).days // 7 + 1)

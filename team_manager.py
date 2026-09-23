@@ -66,6 +66,8 @@ def render(ss, pool, cfg, scoring_key: str, espn=None,
     wk = tc[0].number_input("NFL week", 1, 18, int(default_week), key="tm_week")
     if tc[1].button("🔄 Reload rosters"):
         ss.pop("_tm_rosters", None)
+        ss.pop("_tm_free_agents", None)
+        ss.pop("_tm_all_rostered", None)
 
     if "_tm_rosters" not in ss:
         with st.spinner("Loading your rosters from ESPN…"):
@@ -160,13 +162,39 @@ def render(ss, pool, cfg, scoring_key: str, espn=None,
 
     # ==================== 3) WAIVER ADDS PREDICTED TO ERUPT =================
     st.markdown("##### 📈 Waiver adds predicted to smash")
-    st.caption("Top free-agent pickups ranked by the pickup score (ROS value + "
-               "opportunity). A 🌋 badge = the ceiling model also flags them to "
-               "smash THIS week; ⚠️ = ceiling capped by a shaky QB/cast.")
+    st.caption("From your league's **real** ESPN free-agent/waiver pool. Ranked "
+               "by pickup score (ROS value + opportunity). 🌋 = ceiling model "
+               "flags a smash THIS week; ⚠️ = capped by a shaky QB/cast; "
+               "🔒 = on waivers (must claim), else free agent.")
 
-    # rostered = everyone on any team in the league (so FA = pool − rostered).
-    # We only fetched my teams; fetch the full rostered set for accuracy.
-    rostered = _all_rostered(ss, espn)
+    # ESPN's REAL free-agent/waiver list for this league (not pool − rostered).
+    fa_status = {}      # name -> {'avail_status','percent_owned','injury'}
+    real_fa_names = set()
+    fa_error = None
+    if "_tm_free_agents" not in ss:
+        with st.spinner("Loading the real waiver wire from ESPN…"):
+            try:
+                ss["_tm_free_agents"] = espn.free_agents(limit=300)
+            except Exception as ex:  # noqa: BLE001
+                fa_error = str(ex)
+                ss["_tm_free_agents"] = {"players": [], "names": set()}
+    fa_data = ss.get("_tm_free_agents") or {}
+    for fp in fa_data.get("players", []):
+        fa_status[fp["name"]] = fp
+        real_fa_names.add(fp["name"])
+
+    if not real_fa_names and not fa_error:
+        st.caption("ESPN returned no free agents for this league right now.")
+
+    # Constrain the scorer to ESPN's ACTUAL available players: treat everyone in
+    # the projection pool who is NOT a real FA as 'rostered' so find_waiver_
+    # targets only ranks players ESPN really shows as available. Falls back to
+    # the old pool−rostered behavior if the ESPN FA pull came back empty.
+    if real_fa_names:
+        rostered = {p.name for p in pool if p.name not in real_fa_names}
+    else:
+        rostered = _all_rostered(ss, espn)
+
     try:
         targets = WV.find_waiver_targets(pool, cfg, rostered,
                                          scoring_key=scoring_key, top_n=25,
@@ -186,16 +214,23 @@ def render(ss, pool, cfg, scoring_key: str, espn=None,
         cap = (f"  ·  ⚠️ {spot.cast_quality}"
                if spot and getattr(spot, "cast_quality", "") else "")
         star = "  ·  ⭐" if getattr(t, "star", False) else ""
+        fs = fa_status.get(t.name) or {}
+        wv = "  ·  🔒 waivers" if fs.get("avail_status") == "WAIVER" else ""
+        own = (f"  ·  {fs['percent_owned']:g}% rostered"
+               if fs.get("percent_owned") is not None else "")
         st.markdown(f"**{t.name}** ({t.position}) · {t.priority}"
-                    f"{badge}{cap}{star}  \n"
+                    f"{badge}{cap}{star}{wv}{own}  \n"
                     f"<span style='color:#8a8a94;font-size:12px'>"
                     f"{'; '.join(getattr(t,'reasons',[])[:3])}</span>",
                     unsafe_allow_html=True)
         shown += 1
         if shown >= 15:
             break
-    if not shown:
+    if not shown and not fa_error:
         st.caption("No clear waiver upgrades right now.")
+    if fa_error:
+        st.warning(f"Couldn't load ESPN's waiver wire ({fa_error}); "
+                   "showing best-available from the projection pool instead.")
 
     # ---- log every erupt call this render made to the ledger ----
     all_spots = list(erupt_idx.values()) + list(fa_erupt_idx.values())
@@ -226,39 +261,60 @@ def _all_rostered(ss, espn) -> set:
 
 
 def _render_ledger(espn, season: int, week: int) -> None:
-    st.markdown("##### 📓 Eruption ledger — did the calls hit?")
-    st.caption("Every erupt call this app makes is recorded here so the "
-               "prediction is verifiable. Once real weekly points land, each "
-               "call is scored HIT/MISS.")
+    st.markdown("##### 📓 Prediction ledger — did the calls hit?")
+    st.caption("Every erupt (predicted smash) and stinker (predicted bust) call "
+               "this app makes is recorded here so the prediction is verifiable. "
+               "Once real weekly points land, each call is scored HIT/MISS — an "
+               "erupt hits when the player smashes, a stinker hits when they bust.")
 
+    # Score any COMPLETED prior week (default: the week just finished).
+    prior = week - 1
     cols = st.columns([1, 1, 2])
-    if cols[0].button("Score last week vs actuals"):
+    if cols[0].button(f"Score week {prior} vs actuals") and prior >= 1:
         try:
-            pts = espn.player_week_points(week - 1) if week > 1 else {}
+            pts = espn.player_week_points(prior)
             import espn_client as EC
-            n = LEDGER.score_week(pts, season=season, week=week - 1,
+            n = LEDGER.score_week(pts, season=season, week=prior,
                                   norm_fn=EC._norm_name)
-            st.success(f"Scored {n} calls for week {week - 1}.")
+            st.success(f"Scored {n} calls for week {prior}.")
         except Exception as ex:  # noqa: BLE001
             st.error(f"Couldn't score: {ex}")
 
     hr = LEDGER.hit_rate(season=season)
-    m = st.columns([1, 1, 1, 1])
-    m[0].metric("Calls logged", hr["total"])
-    m[1].metric("Scored", hr["scored"])
-    rate = f'{hr["hit_rate"]*100:.0f}%' if hr["hit_rate"] is not None else "—"
-    m[2].metric("Hit rate", rate)
-    m[3].metric("Pending", hr["pending"])
+    overall = hr["overall"]
+    erupt = hr["by_kind"]["erupt"]
+    stink = hr["by_kind"]["stinker"]
 
-    recent = LEDGER.load(season=season)[:20]
+    def _rate(d):
+        return f'{d["hit_rate"]*100:.0f}%' if d["hit_rate"] is not None else "—"
+
+    st.markdown("**Accuracy by call type**")
+    m = st.columns(3)
+    m[0].metric("🌋 Eruption hit rate", _rate(erupt),
+                help=f'{erupt["hits"]}/{erupt["scored"]} scored · {erupt["pending"]} pending')
+    m[1].metric("💩 Stinker hit rate", _rate(stink),
+                help=f'{stink["hits"]}/{stink["scored"]} scored · {stink["pending"]} pending')
+    m[2].metric("Overall hit rate", _rate(overall),
+                help=f'{overall["hits"]}/{overall["scored"]} scored')
+
+    m2 = st.columns(4)
+    m2[0].metric("Calls logged", overall["total"])
+    m2[1].metric("Scored", overall["scored"])
+    m2[2].metric("Hits", overall["hits"])
+    m2[3].metric("Pending", overall["pending"])
+
+    recent = LEDGER.load(season=season)[:25]
     if recent:
         with st.expander(f"Recent calls ({len(recent)})"):
             for r in recent:
                 res = r.get("result") or "pending"
                 dot = {"HIT": "🟢", "MISS": "🔴"}.get(res, "⚪")
+                kind_icon = "💩" if r.get("kind") == "stinker" else "🌋"
                 actual = (f" · {r['actual_points']} pts"
                           if r.get("actual_points") is not None else "")
+                thr = (f" vs {r['threshold']:g}"
+                       if r.get("threshold") is not None else "")
                 cap = f" · ⚠️ {r['cast_quality']}" if r.get("cast_quality") else ""
-                st.caption(f"{dot} W{r['week']} {r['player']} "
-                           f"({r['position']}) · +{r['ceiling_boost']:g}"
-                           f"{actual}{cap}")
+                st.caption(f"{dot} {kind_icon} W{r['week']} {r['player']} "
+                           f"({r['position']}) · signal +{r['ceiling_boost']:g}"
+                           f"{actual}{thr}{cap}")
