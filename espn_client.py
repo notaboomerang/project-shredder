@@ -32,6 +32,21 @@ try:
 except ImportError:  # requests ships with the LRDP 3.13 env; guard for safety
     requests = None  # type: ignore
 
+# ESPN's Akamai edge 403s plain-requests TLS fingerprints from datacenter IPs
+# (e.g. Fly.io). curl_cffi impersonates a real Chrome TLS handshake and gets
+# through. Prefer it when installed; fall back to plain requests (fine from a
+# residential IP, which is how the desktop app runs).
+def _new_session():
+    """Return a requests-compatible session, impersonating Chrome if possible."""
+    try:
+        from curl_cffi import requests as creq  # type: ignore
+        return creq.Session(impersonate="chrome")
+    except ImportError:
+        if requests is None:
+            raise RuntimeError("neither curl_cffi nor requests is available")
+        return requests.Session()
+
+
 READS_HOST = "https://lm-api-reads.fantasy.espn.com"
 LEGACY_HOST = "https://fantasy.espn.com"
 FAN_HOST = "https://fan.api.espn.com"
@@ -98,7 +113,7 @@ class EspnClient:
         self.league_id = int(league_id)
         self.season = int(season)
         self.timeout = timeout
-        self.sess = requests.Session()
+        self.sess = _new_session()
         self.sess.headers.update({"User-Agent": _UA, "Accept": "application/json"})
         # SWID must be wrapped in {braces}; tolerate the user pasting it either way.
         if swid:  # normalize to exactly one {...} (tolerate bare/half/double-braced)
@@ -114,7 +129,24 @@ class EspnClient:
         params = [("view", v) for v in views]
         r = self.sess.get(url, params=params, timeout=self.timeout)
         r.raise_for_status()
-        return r.json()
+        try:
+            return r.json()
+        except Exception:
+            # ESPN's edge sometimes returns HTTP 200 with a non-JSON body
+            # (Akamai challenge/interstitial) from datacenter IPs. Surface a
+            # snippet + content-type so the logs show the real cause instead of
+            # a bare JSON-decode error. (ESPN_DEBUG=1 to enable.)
+            import os as _os
+            if _os.environ.get("ESPN_DEBUG"):
+                ct = ""
+                try:
+                    ct = r.headers.get("content-type", "")
+                except Exception:
+                    pass
+                body = (r.text or "")[:200].replace("\n", " ")
+                print(f"[espn] {host} status={r.status_code} ctype={ct} "
+                      f"body[:200]={body!r}")
+            raise
 
     def _get_with_fallback(self, views: list[str]) -> dict:
         try:
@@ -677,7 +709,7 @@ def discover_leagues(espn_s2: str, swid: str, timeout: float = 10.0) -> dict:
     # "/fans/%7BGUID" with no %7D and 404ing. Strip ALL braces, then re-wrap.
     guid = "{" + guid.strip("{}").strip() + "}"
 
-    sess = requests.Session()
+    sess = _new_session()
     sess.headers.update({"User-Agent": _UA, "Accept": "application/json"})
     if espn_s2:
         sess.cookies.update({"espn_s2": espn_s2, "SWID": guid})
