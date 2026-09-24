@@ -704,18 +704,27 @@ def matchup_screener(players, week=None, season=None, reception: float = 0.5,
 
 
 def _current_week() -> int:
-    """Best-effort current NFL week (1-18). Anchored to the season's real Week 1
-    Thursday opener; before kickoff we return 1. Purely for schedule lookup, so an
-    off-by-one near a boundary only shifts which opponent is read — never raises."""
+    """Best-effort current NFL week (1-18). Prefers the LIVE ESPN scoreboard
+    week (authoritative); falls back to a calendar anchor when offline. Purely
+    for schedule lookup, so a fallback off-by-one only shifts which opponent is
+    read — never raises."""
+    # LIVE first: ESPN's scoreboard carries the authoritative current week.
+    try:
+        from live_schedule import current_week as _live_week
+        _lw = _live_week()
+        if _lw:
+            return int(_lw)
+    except Exception:
+        pass
     import datetime as _dt
     today = _dt.date.today()
     yr = today.year if today.month >= 8 else today.year - 1
-    # Known Week-1 Thursday openers (the NFL opener is not a fixed offset from
-    # Labor Day — it varies year to year, so pin the real dates we know).
+    # Known Week-1 Thursday openers (fallback only — the NFL opener is not a
+    # fixed offset from Labor Day, so pin the real dates we know).
     KNOWN_OPENERS = {
         2024: _dt.date(2024, 9, 5),
         2025: _dt.date(2025, 9, 4),
-        2026: _dt.date(2026, 9, 3),
+        2026: _dt.date(2026, 9, 9),
     }
     kickoff = KNOWN_OPENERS.get(yr)
     if kickoff is None:
@@ -729,8 +738,20 @@ def _current_week() -> int:
 
 
 def _default_opponent_of():
-    """opponent_of(team, week) backed by matchups.load_schedule(); returns a
-    resolver that yields '' when the schedule/team/week is unavailable (bye)."""
+    """opponent_of(team, week) — LIVE from ESPN's scoreboard first (authoritative
+    real slate), falling back to the static matchups.load_schedule(). Returns a
+    resolver that yields '' when the opponent is unavailable (bye / offline)."""
+    # LIVE first.
+    try:
+        from live_schedule import week_opponents, _norm as _nrm
+        def _resolve_live(team, week):
+            opps = week_opponents(int(week)) if week else week_opponents()
+            return opps.get(_nrm(team), "")
+        # Only use it if the live slate actually returns something for this week.
+        if week_opponents():
+            return _resolve_live
+    except Exception:
+        pass
     try:
         from matchups import load_schedule
         sched = load_schedule()
