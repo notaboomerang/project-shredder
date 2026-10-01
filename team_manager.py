@@ -26,6 +26,7 @@ import lineup_optimizer as LO
 import waiver as WV
 import eruption_watch as EW
 import erupt_ledger as LEDGER
+import trade_facilitator as TF
 
 
 def _pos_of(pool, name: str) -> str:
@@ -239,8 +240,142 @@ def render(ss, pool, cfg, scoring_key: str, espn=None,
         if n:
             st.caption(f"📓 Logged {n} erupt calls to the ledger for week {wk}.")
 
+    # ============================ 4) TRADE FACILITATOR ======================
+    _render_trades(ss, pool, cfg, espn, roster_names)
+
     # ---- ledger recap + hit-rate ----
     _render_ledger(espn, season, int(wk))
+
+
+def _render_trades(ss, pool, cfg, espn, my_roster_names) -> None:
+    """Trade Facilitator — identify every team's strengths/weaknesses, then
+    surface WIN-WIN trades that fix my holes (including dead roster spots like a
+    season-ending injury) without being garbage for the other manager."""
+    st.markdown("---")
+    st.markdown("##### 🔁 Trade Facilitator")
+    st.caption("Finds trades that fix a real hole in YOUR starting lineup from "
+               "your surplus — and only shows ones that also help the other "
+               "manager (both sides gain, or they'd never say yes). A player "
+               "who's out for the year is a dead roster spot: trading him for a "
+               "starter is pure addition.")
+
+    if espn is None:
+        st.info("Connect ESPN to analyze trades.")
+        return
+
+    # ---- season-ending injuries (dead roster spots). Seeded + editable. -----
+    if "_tf_season_ending" not in ss:
+        # Devon Achane — torn ACL, out for the year (confirmed by KC 2026-10-01).
+        ss["_tf_season_ending"] = {"Devon Achane"}
+    se_default = ", ".join(sorted(ss["_tf_season_ending"]))
+    se_text = st.text_input(
+        "Players out for the season (dead roster spots)", value=se_default,
+        help="Comma-separated. These count as a zero in the lineup, so the tool "
+             "treats their slot as a hole to fix and them as a sell asset.",
+        key="tf_season_ending_input")
+    ss["_tf_season_ending"] = {n.strip() for n in se_text.split(",") if n.strip()}
+    season_ending = ss["_tf_season_ending"]
+
+    two_for_one = st.checkbox(
+        "Include 2-for-1 consolidation trades", value=True,
+        help="Package a surplus player (plus a dead roster spot like an injured "
+             "player) to acquire one stud at your biggest need. Turn two bench "
+             "bodies into one starter.",
+        key="tf_two_for_one")
+
+    # ---- load ALL league rosters (separate from the mine_only load above) ---
+    if "_tf_all_rosters" not in ss:
+        with st.spinner("Loading all league rosters from ESPN…"):
+            try:
+                ss["_tf_all_rosters"] = espn.team_rosters(mine_only=False)
+            except Exception as ex:  # noqa: BLE001
+                st.error(f"Couldn't load league rosters: {ex}")
+                return
+    rosters = ss.get("_tf_all_rosters") or {}
+    if not rosters.get("teams"):
+        st.caption("No league rosters available.")
+        return
+
+    # ---- optional draft history for manager tendencies (Tier 2) -------------
+    past_drafts = None
+    try:
+        dstate = espn.draft_state()
+        picks = getattr(dstate, "picks", None) or []
+        if picks:
+            # map team_id -> slot (1-indexed draft order from round 1)
+            slot_by_team = {}
+            for pk in picks:
+                if getattr(pk, "round", 99) == 1:
+                    slot_by_team[pk.team_id] = pk.overall
+            # normalize round-1 overall to a 1..teams slot
+            order = sorted(slot_by_team.items(), key=lambda kv: kv[1])
+            slot_of = {tid: i + 1 for i, (tid, _) in enumerate(order)}
+            past_drafts = [[{"slot": slot_of.get(pk.team_id),
+                             "position": pk.position, "round": pk.round}
+                            for pk in picks]]
+    except Exception:
+        past_drafts = None
+
+    try:
+        res = TF.build(rosters, pool, cfg, season_ending=season_ending,
+                       past_drafts=past_drafts,
+                       allow_two_for_one=bool(two_for_one))
+    except Exception as ex:  # noqa: BLE001
+        st.error(f"Trade analysis failed: {ex}")
+        return
+
+    me = res.get("me")
+    trades = res.get("trades") or []
+
+    # ---- MY strengths & weaknesses -----------------------------------------
+    if me:
+        if me.frozen:
+            for a in me.frozen:
+                st.markdown(
+                    f"🧊 **Dead roster spot:** {a.name} ({a.position}) — "
+                    f"{a.frozen_reason or 'out for the year'}. "
+                    f"He drafted at value but returns 0/week now; the tool treats "
+                    f"this slot as a hole to fill and {a.name} as a sell asset.")
+        c = st.columns(2)
+        strong = me.strongest()
+        weak = me.weakest()
+        c[0].markdown("**Your strengths (trade chips)**  \n"
+                      + ("<br>".join(
+                          f"• {pos}: "
+                          + ", ".join(f"{a.name} (+{a.vorp:g})"
+                                      for a in me.surplus.get(pos, [])[:3])
+                          for pos in strong) or "• None — roster is lean")
+                      , unsafe_allow_html=True)
+        c[1].markdown("**Your weaknesses (fill these)**  \n"
+                      + ("<br>".join(f"• {pos} (hole {me.deficit.get(pos,0):g})"
+                                     for pos in weak) or "• None — balanced")
+                      , unsafe_allow_html=True)
+
+    # ---- WIN-WIN trade cards ------------------------------------------------
+    st.markdown("**Suggested win-win trades**")
+    if not trades:
+        st.caption("No clean win-win trade right now — either your holes are at "
+                   "positions no one has surplus to spare, or the fair deals "
+                   "don't net you a lineup upgrade. Edit the out-for-season list "
+                   "or revisit after waivers.")
+        return
+
+    for i, pr in enumerate(trades[:8], 1):
+        give = ", ".join(f"{a.name} ({a.position})" for a in pr.give)
+        get = ", ".join(f"{a.name} ({a.position})" for a in pr.get)
+        shape = f"{len(pr.give)}-for-{len(pr.get)}"
+        fair = ("even" if 0.85 <= pr.fairness <= 1.18
+                else ("favors you" if pr.fairness > 1.18
+                      else "favors them"))
+        st.markdown(
+            f"**{i}. {pr.partner_team}** · _{shape}_ — you give **{give}**, "
+            f"you get **{get}**  \n"
+            f"<span style='color:#8a8a94;font-size:12px'>"
+            f"Your lineup +{pr.my_delta:g} · their lineup +{pr.their_delta:g} · "
+            f"balance: {fair}<br>"
+            f"<b>Why they say yes:</b> {pr.pitch}<br>"
+            f"<b>Why it helps you:</b> {pr.rationale}</span>",
+            unsafe_allow_html=True)
 
 
 def _all_rostered(ss, espn) -> set:
